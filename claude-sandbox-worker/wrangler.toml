@@ -1,0 +1,19 @@
+name = "claude-sandbox-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Durable Object binding for Sandbox
+[durable_objects]
+bindings = [
+  { name = "Sandbox", class_name = "Sandbox" }
+]
+
+# Migrations - Sandbox requires SQLite storage
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Sandbox"]
+
+# Container configuration (wrangler 4.x format)
+[[containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"

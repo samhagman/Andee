@@ -1,4 +1,18 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Environment files
 .env
+.dev.vars
+
+# Cloudflare Wrangler
+.wrangler/
+
+# Logs
 *.log
+
+# OS files
+.DS_Store

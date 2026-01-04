@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Bot, Context, session, SessionFlavor } from "grammy";
-import { handleClaudeMessage } from "./claude-handler.js";
+import { handleClaudeMessage, resetSandbox } from "./claude-handler.js";
 
 // Session type
 interface SessionData {
@@ -42,9 +42,16 @@ bot.command("start", async (ctx) => {
 
 // /new command - reset conversation
 bot.command("new", async (ctx) => {
+  const chatId = ctx.chat.id;
+
+  // Reset sandbox (destroy container)
+  await resetSandbox(chatId.toString());
+
+  // Clear local session
   ctx.session.claudeSessionId = null;
   ctx.session.messageCount = 0;
-  await ctx.reply("Started a new conversation! Previous context cleared.");
+
+  await ctx.reply("Started a new conversation! Sandbox reset and context cleared.");
 });
 
 // /status command
@@ -66,12 +73,13 @@ bot.on("message:text", async (ctx) => {
   console.log(`[${chatId}] Received: ${userMessage.substring(0, 50)}...`);
 
   // Send "thinking" indicator
-  await ctx.reply("Processing with Claude...");
+  await ctx.reply("Processing with Claude (sandboxed)...");
 
   try {
     const { response, sessionId } = await handleClaudeMessage(
       userMessage,
-      ctx.session.claudeSessionId
+      ctx.session.claudeSessionId,
+      chatId.toString()  // Pass chat ID for sandbox routing
     );
 
     // Update session
