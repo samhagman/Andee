@@ -32,6 +32,7 @@ Telegram bot powered by Claude Code Agent SDK. Message Claude from your phone wi
 |-------|--------|-------------|
 | 1 | ✅ Done | Local bot with direct Agent SDK (TAD_1.md) |
 | 2 | ✅ Done | Sandbox isolation via Docker (TAD_2.md) |
+| 2.1 | ✅ Done | Streaming responses to Telegram |
 | 3 | Planned | Production deployment to Cloudflare |
 
 ## Project Structure
@@ -56,6 +57,49 @@ cd claude-telegram-bot && npm run start
 
 ---
 
+## Streaming Responses (Phase 2.1)
+
+Responses stream progressively to Telegram using `editMessageText` so users see text as Claude generates it.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         STREAMING ARCHITECTURE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Grammy Bot                    Worker                     Container         │
+│  ──────────                    ──────                     ─────────         │
+│      │  POST /ask-stream         │                            │             │
+│      │ ─────────────────────────►│  Start agent in background │             │
+│      │  { started: true }        │ ───────────────────────────►             │
+│      │ ◄─────────────────────────│                            │             │
+│      │                           │                            │             │
+│   ┌──┴──┐                        │         Agent writes       │             │
+│   │POLL │  GET /poll?chatId=     │         progress to        │             │
+│   │LOOP │ ──────────────────────►│  ◄──── /workspace/         │             │
+│   │     │  { text, done }        │         progress.json      │             │
+│   │     │ ◄──────────────────────│                            │             │
+│   │     │                        │                            │             │
+│   │edit │  (every 500ms)         │                            │             │
+│   │msg  │                        │                            │             │
+│   └─────┘                        │                            │             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Testing Streaming
+
+```bash
+# Start streaming query
+curl -X POST http://localhost:8787/ask-stream \
+  -H "Content-Type: application/json" \
+  -d '{"chatId":"test","message":"Say hello","claudeSessionId":null}'
+
+# Poll for progress
+curl "http://localhost:8787/poll?chatId=test"
+```
+
+---
+
 ## Development Workflow & Debugging
 
 ### Testing Without Telegram
@@ -66,10 +110,18 @@ Test the sandbox worker directly with curl (faster iteration):
 # Health check
 curl http://localhost:8787/
 
-# Test ask endpoint
+# Test ask endpoint (synchronous - waits for full response)
 curl -X POST http://localhost:8787/ask \
   -H "Content-Type: application/json" \
   -d '{"chatId":"test123","message":"Say hello","claudeSessionId":null}'
+
+# Test streaming endpoint
+curl -X POST http://localhost:8787/ask-stream \
+  -H "Content-Type: application/json" \
+  -d '{"chatId":"test123","message":"Say hello","claudeSessionId":null}'
+
+# Poll streaming progress
+curl "http://localhost:8787/poll?chatId=test123"
 
 # Reset sandbox
 curl -X POST http://localhost:8787/reset \
@@ -148,6 +200,45 @@ await sandbox.exec(
 );
 ```
 
+### 6. Port Configuration Must Match Between Services
+
+**Problem**: The bot's `SANDBOX_WORKER_URL` port must match the worker's `[dev].port` in wrangler.toml. This has caused repeated `ECONNREFUSED` errors.
+
+**Error**: `TypeError: fetch failed ... ECONNREFUSED`
+
+**Solution**: Both files have prominent comments pointing to each other:
+```toml
+# wrangler.toml
+[dev]
+port = 8787  # Must match SANDBOX_WORKER_URL in ../claude-telegram-bot/.env
+```
+```bash
+# .env
+SANDBOX_WORKER_URL=http://localhost:8787  # Must match [dev].port in ../claude-sandbox-worker/wrangler.toml
+```
+
+### 7. Streaming Requires File-Based Polling
+
+**Problem**: The Cloudflare Sandbox SDK doesn't expose custom TCP ports in local dev. `getTcpPort()` only works for the default port 3000 which is already in use.
+
+**Solution**: Use file-based streaming instead of HTTP server:
+- Agent writes progress to `/workspace/progress.json` as it generates text
+- Worker polls this file using `sandbox.readFile()`
+- Background processes (`nohup ... &`) don't block other sandbox operations
+
+```javascript
+// Agent writes progress
+writeFileSync("/workspace/progress.json", JSON.stringify({
+  text: currentText,
+  done: false,
+  sessionId: session,
+  error: null
+}));
+
+// Worker polls
+const progress = await sandbox.readFile("/workspace/progress.json");
+```
+
 ---
 
 ## Dockerfile Reference
@@ -180,6 +271,10 @@ name = "claude-sandbox-worker"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
+# CRITICAL: Must match SANDBOX_WORKER_URL in ../claude-telegram-bot/.env
+[dev]
+port = 8787
+
 [durable_objects]
 bindings = [
   { name = "Sandbox", class_name = "Sandbox" }
@@ -200,6 +295,7 @@ image = "./Dockerfile"
 
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
+| `ECONNREFUSED` / `fetch failed` | **Port mismatch** | Check `[dev].port` in wrangler.toml matches `SANDBOX_WORKER_URL` in .env |
 | `Claude Code process exited with code 1` | Running as root | Add non-root user to Dockerfile |
 | `Cannot find package '@anthropic-ai/...'` | Missing symlink | Add `ln -s` for node_modules |
 | `SQL is not enabled` | Wrong migrations | Use `new_sqlite_classes` |

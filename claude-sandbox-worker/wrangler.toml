@@ -2,6 +2,13 @@ name = "claude-sandbox-worker"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ IMPORTANT: This port must match SANDBOX_WORKER_URL in                  │
+# │ ../claude-telegram-bot/.env                                            │
+# └─────────────────────────────────────────────────────────────────────────┘
+[dev]
+port = 8787
+
 # Durable Object binding for Sandbox
 [durable_objects]
 bindings = [

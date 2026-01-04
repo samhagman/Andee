@@ -24,7 +24,7 @@ interface AgentOutput {
   claudeSessionId: string | null;
 }
 
-// Agent script content - embedded for simplicity
+// Agent script content - embedded for simplicity (legacy sync mode)
 const AGENT_SCRIPT = `#!/usr/bin/env node
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -89,6 +89,93 @@ async function main() {
 
   writeFileSync("/workspace/output.json", JSON.stringify(output, null, 2));
   console.error("[Agent] Output written to /workspace/output.json");
+}
+
+main().catch(console.error);
+`;
+
+// Streaming agent - writes progress to file instead of HTTP
+const AGENT_STREAM_SCRIPT = `#!/usr/bin/env node
+
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync, writeFileSync } from "fs";
+
+const input = JSON.parse(readFileSync("/workspace/input.json", "utf-8"));
+const { message, claudeSessionId } = input;
+
+// Progress file for streaming updates
+const PROGRESS_FILE = "/workspace/progress.json";
+
+function writeProgress(state) {
+  writeFileSync(PROGRESS_FILE, JSON.stringify(state, null, 2));
+}
+
+async function main() {
+  let sessionId = claudeSessionId;
+  let text = "";
+
+  writeProgress({ text: "", done: false, sessionId: null, error: null });
+  console.error("[Agent] Starting streaming query...");
+
+  try {
+    for await (const msg of query({
+      prompt: message,
+      options: {
+        resume: claudeSessionId || undefined,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        allowedTools: [
+          "Read", "Write", "Edit",
+          "Bash",
+          "Glob", "Grep",
+          "WebSearch", "WebFetch",
+          "Task"
+        ],
+        cwd: "/workspace/files",
+        model: "claude-sonnet-4-5",
+        maxTurns: 25
+      }
+    })) {
+      // Debug: log all message types to understand SDK streaming behavior
+      console.error(\`[Agent] Message: type=\${msg.type} subtype=\${msg.subtype || "none"}\`);
+
+      // Capture session ID
+      if (msg.type === "system" && msg.subtype === "init") {
+        sessionId = msg.session_id;
+        console.error(\`[Agent] Session: \${sessionId}\`);
+        writeProgress({ text, done: false, sessionId, error: null });
+      }
+
+      // Capture assistant text - accumulate content from each turn
+      if (msg.type === "assistant" && msg.message?.content) {
+        for (const block of msg.message.content) {
+          if (block.type === "text") {
+            text = block.text;
+            console.error(\`[Agent] Got text: \${text.length} chars\`);
+            writeProgress({ text, done: false, sessionId, error: null });
+          }
+        }
+      }
+
+      // Capture final result
+      if (msg.type === "result") {
+        if (msg.subtype === "success") {
+          text = msg.result;
+          console.error("[Agent] Query completed successfully");
+          writeProgress({ text, done: true, sessionId, error: null });
+        } else {
+          let error = \`Query ended: \${msg.subtype}\`;
+          if (msg.errors) {
+            error += "\\n" + msg.errors.join("\\n");
+          }
+          writeProgress({ text, done: true, sessionId, error });
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[Agent] Error:", error);
+    writeProgress({ text, done: true, sessionId, error: error.message || "Unknown error" });
+  }
 }
 
 main().catch(console.error);
@@ -269,6 +356,100 @@ test();
             response: `Sandbox error: ${error instanceof Error ? error.message : "Unknown error"}`,
             claudeSessionId: null
           },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    }
+
+    // Streaming endpoint: /ask-stream - Start a streaming query (file-based)
+    if (url.pathname === "/ask-stream" && request.method === "POST") {
+      try {
+        const body = await request.json() as AskRequest;
+        const { chatId, message, claudeSessionId } = body;
+
+        if (!chatId || !message) {
+          return Response.json(
+            { error: "Missing chatId or message" },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        console.log(`[Worker] Starting streaming request for chat ${chatId}`);
+
+        // Get or create sandbox for this chat
+        const sandbox = getSandbox(env.Sandbox, `chat-${chatId}`, {
+          sleepAfter: 10 * 60 * 1000,
+        });
+
+        // Write the streaming agent script
+        await sandbox.writeFile("/workspace/stream_agent.mjs", AGENT_STREAM_SCRIPT);
+
+        // Write input
+        const input = { message, claudeSessionId };
+        await sandbox.writeFile("/workspace/input.json", JSON.stringify(input));
+
+        // Initialize progress file
+        await sandbox.writeFile("/workspace/progress.json", JSON.stringify({
+          text: "",
+          done: false,
+          sessionId: null,
+          error: null
+        }));
+
+        // Start agent in background (returns immediately)
+        const startResult = await sandbox.exec(
+          `ANTHROPIC_API_KEY=${env.ANTHROPIC_API_KEY} HOME=/home/claude nohup node /workspace/stream_agent.mjs > /workspace/agent.log 2>&1 &`,
+          { timeout: 5000 }
+        );
+        console.log(`[Worker] Agent started: exit=${startResult.exitCode}`);
+
+        // Return immediately - client will poll for progress
+        return Response.json({ started: true, chatId }, { headers: corsHeaders });
+
+      } catch (error) {
+        console.error("[Worker] Streaming error:", error);
+        return Response.json(
+          { error: error instanceof Error ? error.message : "Unknown error" },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    }
+
+    // Streaming endpoint: /poll - Poll for query status (file-based)
+    if (url.pathname === "/poll" && request.method === "GET") {
+      try {
+        const chatId = url.searchParams.get("chatId");
+
+        if (!chatId) {
+          return Response.json(
+            { error: "Missing chatId" },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        const sandbox = getSandbox(env.Sandbox, `chat-${chatId}`, {
+          sleepAfter: 10 * 60 * 1000,
+        });
+
+        // Read progress file
+        try {
+          const progressFile = await sandbox.readFile("/workspace/progress.json");
+          const progress = JSON.parse(progressFile.content);
+          return Response.json(progress, { headers: corsHeaders });
+        } catch (e) {
+          // File doesn't exist yet or is invalid
+          return Response.json({
+            text: "",
+            done: false,
+            sessionId: null,
+            error: null
+          }, { headers: corsHeaders });
+        }
+
+      } catch (error) {
+        console.error("[Worker] Poll error:", error);
+        return Response.json(
+          { error: error instanceof Error ? error.message : "Unknown error" },
           { status: 500, headers: corsHeaders }
         );
       }

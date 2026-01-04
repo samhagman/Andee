@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Bot, Context, session, SessionFlavor } from "grammy";
-import { handleClaudeMessage, resetSandbox } from "./claude-handler.js";
+import { handleClaudeMessageStreaming, resetSandbox } from "./claude-handler.js";
 
 // Session type
 interface SessionData {
@@ -9,6 +9,90 @@ interface SessionData {
 }
 
 type MyContext = Context & SessionFlavor<SessionData>;
+
+// Telegram limits and streaming config
+const TG_LIMIT = 4096;
+const TAIL_CHARS = 3;        // Keep last 3 chars visible when splitting
+const ELLIPSIS = "...";      // Inserted before the tail
+const THROTTLE_MS = 500;     // Edit at most ~2x/sec
+const TYPING_EVERY_MS = 4000; // sendChatAction lasts ~5s
+
+// Helper: sleep
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Split text into a displayChunk that fits TG_LIMIT with "..." before last 3 chars,
+ * and carry (the hidden chars + remainder) for the next message.
+ */
+function splitWithEllipsisTail(text: string): { displayChunk: string; carry: string } {
+  const first = text.slice(0, TG_LIMIT);
+  const remainder = text.slice(TG_LIMIT);
+
+  const prefixLen = TG_LIMIT - (ELLIPSIS.length + TAIL_CHARS); // e.g. 4096 - 6 = 4090
+  const prefix = first.slice(0, prefixLen);
+  const hidden = first.slice(prefixLen, TG_LIMIT - TAIL_CHARS); // 3 chars hidden
+  const tail = first.slice(TG_LIMIT - TAIL_CHARS);              // last 3 chars
+
+  const displayChunk = prefix + ELLIPSIS + tail; // total length == TG_LIMIT
+  const carry = hidden + remainder;               // continue with hidden + rest
+
+  return { displayChunk, carry };
+}
+
+/**
+ * Edit message with retry on rate limit (429 errors)
+ */
+async function editWithRetry(
+  api: Context["api"],
+  chatId: number,
+  messageId: number,
+  text: string,
+  tries = 3
+): Promise<boolean> {
+  const safeText = text.length ? text : "…";
+  try {
+    await api.editMessageText(chatId, messageId, safeText, {
+      link_preview_options: { is_disabled: true },
+    });
+    return true;
+  } catch (err: unknown) {
+    // Check for rate limit (429)
+    const error = err as { parameters?: { retry_after?: number } };
+    const retryAfter = error?.parameters?.retry_after;
+    if (tries > 0 && typeof retryAfter === "number") {
+      await sleep((retryAfter + 0.2) * 1000);
+      return editWithRetry(api, chatId, messageId, text, tries - 1);
+    }
+    // Ignore "message is not modified" errors
+    return false;
+  }
+}
+
+/**
+ * Send new message with retry on rate limit
+ */
+async function sendWithRetry(
+  api: Context["api"],
+  chatId: number,
+  text: string,
+  tries = 3
+): Promise<number> {
+  const safeText = text.length ? text : "…";
+  try {
+    const msg = await api.sendMessage(chatId, safeText, {
+      link_preview_options: { is_disabled: true },
+    });
+    return msg.message_id;
+  } catch (err: unknown) {
+    const error = err as { parameters?: { retry_after?: number } };
+    const retryAfter = error?.parameters?.retry_after;
+    if (tries > 0 && typeof retryAfter === "number") {
+      await sleep((retryAfter + 0.2) * 1000);
+      return sendWithRetry(api, chatId, text, tries - 1);
+    }
+    throw err;
+  }
+}
 
 // Validate environment
 if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN not set");
@@ -65,73 +149,105 @@ bot.command("status", async (ctx) => {
   );
 });
 
-// Handle text messages
+// Handle text messages - with streaming updates
 bot.on("message:text", async (ctx) => {
   const userMessage = ctx.message.text;
   const chatId = ctx.chat.id;
 
   console.log(`[${chatId}] Received: ${userMessage.substring(0, 50)}...`);
 
-  // Send "thinking" indicator
-  await ctx.reply("Processing with Claude (sandboxed)...");
+  // Send initial placeholder message
+  const statusMsg = await ctx.reply("…");
+  let currentMessageId = statusMsg.message_id;
+
+  // Keep typing indicator alive while streaming
+  const typingTimer = setInterval(() => {
+    ctx.api.sendChatAction(chatId, "typing").catch(() => {});
+  }, TYPING_EVERY_MS);
+
+  // Streaming state
+  let displayedText = "";          // What's currently shown in the current message
+  let lastFlushAt = 0;
+  let consumedChars = 0;           // How many chars have been "finalized" in previous messages
+  const sentMessages: number[] = [currentMessageId]; // Track all message IDs we've sent
 
   try {
-    const { response, sessionId } = await handleClaudeMessage(
+    const { response, sessionId } = await handleClaudeMessageStreaming(
       userMessage,
       ctx.session.claudeSessionId,
-      chatId.toString()  // Pass chat ID for sandbox routing
+      chatId.toString(),
+      async (fullText) => {
+        // Throttle updates
+        const now = Date.now();
+        if (now - lastFlushAt < THROTTLE_MS) return;
+        lastFlushAt = now;
+
+        // Calculate what text belongs to the current message
+        // consumedChars tracks how much has been finalized in previous messages
+        // Each finalized message consumed (TG_LIMIT - ELLIPSIS.length) chars of original text
+        // because we replace 3 chars with "..." + those 3 chars go to next message
+
+        let buffer = fullText.slice(consumedChars);
+
+        // Process any overflows - roll over into new messages
+        while (buffer.length > TG_LIMIT) {
+          const { displayChunk, carry } = splitWithEllipsisTail(buffer);
+
+          // Finalize current message with "...XYZ"
+          await editWithRetry(ctx.api, chatId, currentMessageId, displayChunk);
+
+          // Track how much of original text we consumed (the prefix part)
+          // displayChunk has TG_LIMIT chars, but ELLIPSIS replaced 3 chars that go to carry
+          const charsConsumed = TG_LIMIT - ELLIPSIS.length; // 4093 chars consumed per message
+          consumedChars += charsConsumed;
+
+          // Start a new message for the continuation
+          currentMessageId = await sendWithRetry(ctx.api, chatId, "…");
+          sentMessages.push(currentMessageId);
+
+          buffer = carry;
+          await sleep(50); // Tiny pause to reduce burstiness
+        }
+
+        // Normal streaming update - only edit if text changed
+        if (buffer !== displayedText) {
+          await editWithRetry(ctx.api, chatId, currentMessageId, buffer);
+          displayedText = buffer;
+        }
+      }
     );
+
+    // Final update with complete response
+    // Account for already-consumed chars from streaming overflow handling
+    let finalBuffer = response.slice(consumedChars);
+
+    while (finalBuffer.length > TG_LIMIT) {
+      const { displayChunk, carry } = splitWithEllipsisTail(finalBuffer);
+      await editWithRetry(ctx.api, chatId, currentMessageId, displayChunk);
+      currentMessageId = await sendWithRetry(ctx.api, chatId, "…");
+      sentMessages.push(currentMessageId);
+      finalBuffer = carry;
+    }
+
+    // Final edit
+    if (finalBuffer.length > 0) {
+      await editWithRetry(ctx.api, chatId, currentMessageId, finalBuffer);
+    }
 
     // Update session
     ctx.session.claudeSessionId = sessionId;
     ctx.session.messageCount++;
 
-    // Send response (split if too long)
-    await sendLongMessage(ctx, response);
-
-    console.log(`[${chatId}] Responded successfully`);
+    console.log(`[${chatId}] Responded successfully (${sentMessages.length} message(s))`);
   } catch (error) {
     console.error(`[${chatId}] Error:`, error);
-    await ctx.reply(
-      "Sorry, an error occurred while processing your message.\n" +
-      `Error: ${error instanceof Error ? error.message : "Unknown error"}`
-    );
+    const errorMsg = "Sorry, an error occurred while processing your message.\n" +
+      `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+    await editWithRetry(ctx.api, chatId, currentMessageId, errorMsg);
+  } finally {
+    clearInterval(typingTimer);
   }
 });
-
-// Helper: Send long messages in chunks
-async function sendLongMessage(ctx: MyContext, text: string): Promise<void> {
-  const MAX_LENGTH = 4000; // Telegram limit is 4096
-
-  if (text.length <= MAX_LENGTH) {
-    await ctx.reply(text);
-    return;
-  }
-
-  // Split at newlines when possible
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= MAX_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Try to split at a newline
-    let splitIndex = remaining.lastIndexOf("\n", MAX_LENGTH);
-    if (splitIndex === -1 || splitIndex < MAX_LENGTH / 2) {
-      splitIndex = MAX_LENGTH;
-    }
-
-    chunks.push(remaining.substring(0, splitIndex));
-    remaining = remaining.substring(splitIndex).trimStart();
-  }
-
-  for (const chunk of chunks) {
-    await ctx.reply(chunk);
-  }
-}
 
 // Error handler
 bot.catch((err) => {
