@@ -1,0 +1,13 @@
+{
+  "name": "@andee/apps",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Andee Telegram Mini Apps - unified static site",
+  "scripts": {
+    "dev": "npx wrangler pages dev src --port 8788",
+    "deploy": "npx wrangler pages deploy src --project-name=andee"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

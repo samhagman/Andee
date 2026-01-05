@@ -19,6 +19,12 @@ RUN ln -s /usr/local/lib/node_modules /workspace/node_modules
 # Create .claude directory for the user
 RUN mkdir -p /home/claude/.claude && chown -R claude:claude /home/claude/.claude
 
+# Copy skills into container
+COPY --chown=claude:claude .claude/skills/ /home/claude/.claude/skills/
+
+# Expose port 8080 for persistent server (3000 is used by Sandbox infrastructure)
+EXPOSE 8080
+
 # Switch to non-root user
 USER claude
 

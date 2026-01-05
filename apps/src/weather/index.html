@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Weather Report</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg-color: #ffffff;
+      --text-color: #000000;
+      --secondary-text: #666666;
+      --card-bg: #f5f5f5;
+      --accent: #3390ec;
+      --range-bg: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-color: #1c1c1d;
+        --text-color: #ffffff;
+        --secondary-text: #8e8e93;
+        --card-bg: #2c2c2e;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-color);
+      color: var(--text-color);
+      padding: 16px;
+      padding-bottom: 32px;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .location {
+      font-size: 22px;
+      font-weight: 600;
+    }
+
+    .unit-toggle {
+      background: var(--card-bg);
+      border: none;
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: var(--text-color);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .unit-toggle:active {
+      opacity: 0.7;
+    }
+
+    .current-card {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 24px;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+
+    .weather-icon {
+      font-size: 64px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .current-temp {
+      font-size: 56px;
+      font-weight: 300;
+      letter-spacing: -2px;
+    }
+
+    .current-temp-secondary {
+      font-size: 24px;
+      color: var(--secondary-text);
+      font-weight: 400;
+    }
+
+    .feels-like {
+      color: var(--secondary-text);
+      margin-top: 8px;
+      font-size: 15px;
+    }
+
+    .range-card {
+      background: var(--range-bg);
+      border-radius: 20px;
+      padding: 20px;
+      color: white;
+      margin-bottom: 16px;
+    }
+
+    .range-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      opacity: 0.9;
+      margin-bottom: 12px;
+    }
+
+    .range-temps {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .range-item {
+      text-align: center;
+    }
+
+    .range-label {
+      font-size: 12px;
+      opacity: 0.8;
+      margin-bottom: 4px;
+    }
+
+    .range-value {
+      font-size: 28px;
+      font-weight: 600;
+    }
+
+    .range-secondary {
+      font-size: 14px;
+      opacity: 0.8;
+    }
+
+    .range-divider {
+      font-size: 24px;
+      opacity: 0.5;
+    }
+
+    .transitions-card {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--secondary-text);
+      margin-bottom: 12px;
+    }
+
+    .transition-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 16px;
+      padding: 8px 0;
+    }
+
+    .transition-arrow {
+      color: var(--secondary-text);
+    }
+
+    .transition-time {
+      color: var(--secondary-text);
+      font-size: 14px;
+    }
+
+    .hourly-section {
+      margin-bottom: 16px;
+    }
+
+    .hourly-scroll {
+      display: flex;
+      overflow-x: auto;
+      gap: 8px;
+      padding: 4px 0;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+
+    .hourly-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .hour-card {
+      flex-shrink: 0;
+      background: var(--card-bg);
+      border-radius: 16px;
+      padding: 12px 14px;
+      text-align: center;
+      min-width: 64px;
+    }
+
+    .hour-time {
+      font-size: 13px;
+      color: var(--secondary-text);
+      font-weight: 500;
+    }
+
+    .hour-icon {
+      font-size: 28px;
+      margin: 8px 0;
+      line-height: 1;
+    }
+
+    .hour-temp {
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    .hour-precip {
+      font-size: 12px;
+      color: var(--accent);
+      margin-top: 4px;
+      font-weight: 500;
+    }
+
+    .recommendations {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 16px 20px;
+    }
+
+    .rec-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 0;
+      font-size: 15px;
+    }
+
+    .rec-item:not(:last-child) {
+      border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+    }
+
+    .rec-icon {
+      font-size: 24px;
+    }
+
+    .generated-at {
+      text-align: center;
+      font-size: 12px;
+      color: var(--secondary-text);
+      margin-top: 20px;
+    }
+
+    .error-state {
+      text-align: center;
+      padding: 40px 20px;
+    }
+
+    .error-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    .error-text {
+      color: var(--secondary-text);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="header">
+      <div class="location" id="location">Loading...</div>
+      <button class="unit-toggle" id="unit-toggle">C / F</button>
+    </div>
+
+    <div class="current-card">
+      <div class="weather-icon" id="current-icon"></div>
+      <div class="current-temp">
+        <span id="current-temp-primary">--</span><span id="current-temp-secondary" class="current-temp-secondary"></span>
+      </div>
+      <div class="feels-like" id="feels-like">Feels like --</div>
+    </div>
+
+    <div class="range-card">
+      <div class="range-title">Today's Range</div>
+      <div class="range-temps">
+        <div class="range-item">
+          <div class="range-label">Low</div>
+          <div class="range-value" id="range-low">--</div>
+          <div class="range-secondary" id="range-low-alt"></div>
+        </div>
+        <div class="range-divider">~</div>
+        <div class="range-item">
+          <div class="range-label">High</div>
+          <div class="range-value" id="range-high">--</div>
+          <div class="range-secondary" id="range-high-alt"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="transitions-card" id="transitions-card">
+      <div class="section-title">Weather Changes</div>
+      <div id="transitions-container"></div>
+    </div>
+
+    <div class="hourly-section">
+      <div class="section-title">Hourly Forecast</div>
+      <div class="hourly-scroll" id="hourly-container"></div>
+    </div>
+
+    <div class="recommendations" id="recommendations">
+      <div class="section-title">Recommendations</div>
+      <div id="rec-container"></div>
+    </div>
+
+    <div class="generated-at" id="generated-at"></div>
+  </div>
+
+  <script>
+    // Initialize Telegram WebApp
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+
+      // Apply Telegram theme colors
+      if (tg.themeParams) {
+        const tp = tg.themeParams;
+        if (tp.bg_color) document.documentElement.style.setProperty('--bg-color', tp.bg_color);
+        if (tp.text_color) document.documentElement.style.setProperty('--text-color', tp.text_color);
+        if (tp.hint_color) document.documentElement.style.setProperty('--secondary-text', tp.hint_color);
+        if (tp.secondary_bg_color) document.documentElement.style.setProperty('--card-bg', tp.secondary_bg_color);
+        if (tp.link_color) document.documentElement.style.setProperty('--accent', tp.link_color);
+      }
+    }
+
+    // Weather code to emoji mapping
+    const weatherEmoji = {
+      0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
+      45: '🌫️', 48: '🌫️',
+      51: '🌦️', 53: '🌦️', 55: '🌧️',
+      61: '🌧️', 63: '🌧️', 65: '🌧️',
+      71: '🌨️', 73: '🌨️', 75: '❄️',
+      77: '❄️',
+      80: '🌦️', 81: '🌧️', 82: '⛈️',
+      85: '🌨️', 86: '🌨️',
+      95: '⛈️', 96: '⛈️', 99: '⛈️'
+    };
+
+    function getWeatherEmoji(code) {
+      return weatherEmoji[code] || '🌡️';
+    }
+
+    // Temperature conversion
+    function toF(c) {
+      return Math.round(c * 9/5 + 32);
+    }
+
+    // State
+    let showCelsius = true;
+    let weatherData = null;
+
+    function formatTemp(c, showUnit = true) {
+      if (showCelsius) {
+        return showUnit ? `${Math.round(c)}°C` : `${Math.round(c)}°`;
+      }
+      return showUnit ? `${toF(c)}°F` : `${toF(c)}°`;
+    }
+
+    function formatTempAlt(c) {
+      if (showCelsius) {
+        return `${toF(c)}°F`;
+      }
+      return `${Math.round(c)}°C`;
+    }
+
+    // Normalize data from compact or full format
+    function normalizeData(data) {
+      // If compact format (has 'loc' key), expand it
+      if (data.loc !== undefined) {
+        return {
+          location: data.loc,
+          current: {
+            temp_c: data.c,
+            temp_f: data.f ?? toF(data.c),
+            feels_like_c: data.fl ?? data.c,
+            feels_like_f: data.ff ?? toF(data.fl ?? data.c),
+            weathercode: data.wc ?? 0
+          },
+          range: {
+            low_c: data.lo,
+            low_f: toF(data.lo),
+            high_c: data.hi,
+            high_f: toF(data.hi)
+          },
+          transitions: [],
+          hourly: []
+        };
+      }
+      // Already in full format
+      return data;
+    }
+
+    function render(rawData) {
+      if (!rawData) return;
+
+      const data = normalizeData(rawData);
+
+      // Location
+      document.getElementById('location').textContent = data.location || 'Weather';
+
+      // Current weather
+      const current = data.current || {};
+      document.getElementById('current-icon').textContent = getWeatherEmoji(current.weathercode);
+
+      if (showCelsius) {
+        document.getElementById('current-temp-primary').textContent = `${Math.round(current.temp_c)}°`;
+        document.getElementById('current-temp-secondary').textContent = ` / ${Math.round(current.temp_f)}°F`;
+      } else {
+        document.getElementById('current-temp-primary').textContent = `${Math.round(current.temp_f)}°`;
+        document.getElementById('current-temp-secondary').textContent = ` / ${Math.round(current.temp_c)}°C`;
+      }
+
+      const feelsC = current.feels_like_c ?? current.temp_c;
+      const feelsF = current.feels_like_f ?? toF(feelsC);
+      document.getElementById('feels-like').textContent =
+        `Feels like ${showCelsius ? Math.round(feelsC) + '°C' : Math.round(feelsF) + '°F'}`;
+
+      // Range
+      const range = data.range || {};
+      if (showCelsius) {
+        document.getElementById('range-low').textContent = `${Math.round(range.low_c)}°C`;
+        document.getElementById('range-low-alt').textContent = `${Math.round(range.low_f)}°F`;
+        document.getElementById('range-high').textContent = `${Math.round(range.high_c)}°C`;
+        document.getElementById('range-high-alt').textContent = `${Math.round(range.high_f)}°F`;
+      } else {
+        document.getElementById('range-low').textContent = `${Math.round(range.low_f)}°F`;
+        document.getElementById('range-low-alt').textContent = `${Math.round(range.low_c)}°C`;
+        document.getElementById('range-high').textContent = `${Math.round(range.high_f)}°F`;
+        document.getElementById('range-high-alt').textContent = `${Math.round(range.high_c)}°C`;
+      }
+
+      // Transitions - hide if empty (compact format won't have these)
+      const transitions = data.transitions || [];
+      const transitionsCard = document.getElementById('transitions-card');
+      if (transitions.length > 0) {
+        document.getElementById('transitions-container').innerHTML = transitions.map((t, i) => {
+          if (i === 0) {
+            return `<div class="transition-item">
+              <span>${t.emoji}</span>
+              <span>${t.type}</span>
+              <span class="transition-time">(${t.start}–${t.end})</span>
+            </div>`;
+          }
+          return `<div class="transition-item">
+            <span class="transition-arrow">→</span>
+            <span>${t.emoji}</span>
+            <span>${t.type}</span>
+            <span class="transition-time">(${t.start}–${t.end})</span>
+          </div>`;
+        }).join('');
+        transitionsCard.style.display = 'block';
+      } else {
+        transitionsCard.style.display = 'none';
+      }
+
+      // Hourly forecast - hide if empty (compact format won't have this)
+      const hourly = data.hourly || [];
+      const hourlySection = document.querySelector('.hourly-section');
+      if (hourly.length > 0) {
+        document.getElementById('hourly-container').innerHTML = hourly.map(h => `
+          <div class="hour-card">
+            <div class="hour-time">${h.time}</div>
+            <div class="hour-icon">${getWeatherEmoji(h.weathercode)}</div>
+            <div class="hour-temp">${formatTemp(h.temp_c, false)}</div>
+            ${h.precip_prob > 20 ? `<div class="hour-precip">${h.precip_prob}%</div>` : ''}
+          </div>
+        `).join('');
+        hourlySection.style.display = 'block';
+      } else {
+        hourlySection.style.display = 'none';
+      }
+
+      // Recommendations
+      const recs = [];
+      const lowC = range.low_c ?? 10;
+      const hasRain = hourly.some(h => h.precip_prob > 50);
+      const hasSnow = hourly.some(h => [71, 73, 75, 77, 85, 86].includes(h.weathercode));
+
+      if (lowC < -10) {
+        recs.push({ icon: '🧥', text: '4 layers + thermal pants, scarf & gloves required' });
+      } else if (lowC < -5) {
+        recs.push({ icon: '🧥', text: '3-4 layers recommended, scarf helpful' });
+      } else if (lowC < 1) {
+        recs.push({ icon: '🧥', text: '2-3 layers recommended' });
+      } else if (lowC < 10) {
+        recs.push({ icon: '🧥', text: '1-2 layers, light jacket' });
+      } else if (lowC < 20) {
+        recs.push({ icon: '👕', text: 'Light layers should be fine' });
+      } else {
+        recs.push({ icon: '👕', text: 'Light clothing' });
+      }
+
+      if (hasRain && !hasSnow) {
+        recs.push({ icon: '☔', text: 'Bring an umbrella' });
+      }
+      if (hasSnow) {
+        recs.push({ icon: '🥾', text: 'Wear boots for snow' });
+      }
+
+      document.getElementById('rec-container').innerHTML = recs.map(r => `
+        <div class="rec-item">
+          <span class="rec-icon">${r.icon}</span>
+          <span>${r.text}</span>
+        </div>
+      `).join('');
+
+      // Generated timestamp
+      if (data.generated_at) {
+        try {
+          const date = new Date(data.generated_at);
+          document.getElementById('generated-at').textContent =
+            `Updated ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+        } catch (e) {
+          document.getElementById('generated-at').textContent = '';
+        }
+      }
+    }
+
+    function showError(message, debug = '') {
+      document.getElementById('app').innerHTML = `
+        <div class="error-state">
+          <div class="error-icon">⚠️</div>
+          <div class="error-text">${message}</div>
+          ${debug ? `<div style="margin-top:20px;font-size:10px;color:#888;word-break:break-all;max-width:300px;">${debug}</div>` : ''}
+        </div>
+      `;
+    }
+
+    // Toggle temperature units
+    document.getElementById('unit-toggle')?.addEventListener('click', () => {
+      showCelsius = !showCelsius;
+      if (weatherData) render(weatherData);
+    });
+
+    // Parse data from URL - check HASH first (Telegram uses hash), then query params as fallback
+    // Telegram Mini Apps pass launch params via hash: #data=xyz&tgWebAppVersion=7.2&...
+
+    function base64urlToBase64(base64url) {
+      // Convert base64url to standard base64
+      let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+      // Add padding if needed
+      const pad = base64.length % 4;
+      if (pad) {
+        base64 += '='.repeat(4 - pad);
+      }
+      return base64;
+    }
+
+    function extractDataParam() {
+      // Try hash first (Telegram's preferred method)
+      const hash = window.location.hash.slice(1); // Remove leading #
+      if (hash) {
+        const hashParams = new URLSearchParams(hash);
+        const hashData = hashParams.get('data');
+        if (hashData) return { data: hashData, source: 'hash' };
+      }
+
+      // Fallback to query params
+      const searchParams = new URLSearchParams(window.location.search);
+      const searchData = searchParams.get('data');
+      if (searchData) return { data: searchData, source: 'query' };
+
+      return { data: null, source: 'none' };
+    }
+
+    const { data: dataParam, source: dataSource } = extractDataParam();
+    const debugInfo = `URL: ${window.location.href.substring(0, 60)}... | Hash: ${window.location.hash.substring(0, 40)}... | Source: ${dataSource} | Data: ${dataParam ? dataParam.substring(0, 20) + '...' : 'NULL'}`;
+
+    if (dataParam) {
+      try {
+        // Clean whitespace and convert from base64url if needed
+        const cleanParam = dataParam.replace(/\s/g, '');
+        const base64 = base64urlToBase64(cleanParam);
+        let jsonString = atob(base64);
+
+        // Fix any corrupted JSON keys (spaces in key names)
+        jsonString = jsonString.replace(/"([^"]+)":/g, (match, key) => {
+          return '"' + key.replace(/\s+/g, '') + '":';
+        });
+
+        weatherData = JSON.parse(jsonString);
+        render(weatherData);
+      } catch (e) {
+        console.error('Failed to parse weather data:', e, 'Raw param:', dataParam?.substring(0, 100));
+        showError('Unable to load weather data', `Error: ${e.message} | ${debugInfo}`);
+      }
+    } else {
+      showError('No weather data provided', debugInfo);
+    }
+  </script>
+</body>
+</html>

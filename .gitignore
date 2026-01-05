@@ -19,3 +19,9 @@ dist/
 
 # IDE
 .idea/
+
+# Large documentation files (use web search instead)
+llm_context/
+
+# Root package-lock (individual packages have their own)
+/package-lock.json

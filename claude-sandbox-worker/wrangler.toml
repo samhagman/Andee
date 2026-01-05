@@ -21,6 +21,19 @@ tag = "v1"
 new_sqlite_classes = ["Sandbox"]
 
 # Container configuration (wrangler 4.x format)
+# Instance types: lite (1/16 vCPU), basic (1/4), standard-1 (1/2),
+#                 standard-2 (1 vCPU), standard-3 (2), standard-4 (4)
 [[containers]]
 class_name = "Sandbox"
 image = "./Dockerfile"
+instance_type = "standard-4"  # 4 vCPU, 12 GiB RAM, 20 GB disk (max available)
+
+# R2 binding for transcript persistence (optional enhancement)
+[[r2_buckets]]
+binding = "TRANSCRIPTS"
+bucket_name = "andee-transcripts"
+
+# R2 binding for session storage (shared with telegram bot)
+[[r2_buckets]]
+binding = "SESSIONS"
+bucket_name = "andee-sessions"

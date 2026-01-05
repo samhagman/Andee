@@ -1,0 +1,13 @@
+name = "claude-telegram-bot"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# R2 binding for session storage
+[[r2_buckets]]
+binding = "SESSIONS"
+bucket_name = "andee-sessions"
+
+# Service Binding to Sandbox Worker (lower latency than HTTP)
+[[services]]
+binding = "SANDBOX_WORKER"
+service = "claude-sandbox-worker"
