@@ -10,6 +10,7 @@ How to build features for Andee.
 - [Creating Mini Apps](#creating-mini-apps)
 - [Available Container Tools](#available-container-tools)
 - [File Locations](#file-locations)
+- [Container Scripts](#container-scripts)
 - [Development Workflow](#development-workflow)
 - [Skill Pattern Examples](#skill-pattern-examples)
 
@@ -243,7 +244,7 @@ Generate Direct Links in your skill:
 [Button](https://t.me/HeyAndee_bot/app?startapp=mycomponent_{base64url})
 ```
 
-For full details, see the `telegram-mini-app-dev` skill.
+For full details, see [guides/mini-apps.md](guides/mini-apps.md).
 
 ---
 
@@ -278,6 +279,66 @@ Paths inside the container:
 | `/workspace/telegram_agent.log` | Agent logs (view via `/logs` endpoint) |
 
 **Important:** Port 3000 is reserved by Cloudflare Sandbox. Use port 8080 for internal services.
+
+---
+
+## Container Scripts
+
+Scripts that run inside the Docker container are stored as `.script.js` files and imported as raw text using Wrangler's `[[rules]]` feature.
+
+### Why .script.js?
+
+Previously scripts were embedded as template literal strings (no syntax highlighting). Now they're real JavaScript files with full editor support:
+
+| Feature | Old (template literal) | New (.script.js) |
+|---------|------------------------|------------------|
+| Syntax highlighting | No | Yes |
+| ESLint linting | No | Yes |
+| JSDoc types | No | Yes |
+| Escape hell | `\\n`, `\${` | Normal JS |
+
+### Script Files
+
+```
+claude-sandbox-worker/src/scripts/
+├── persistent-server.script.js   # Main HTTP server (streaming input mode)
+├── agent-telegram.script.js      # Fallback one-shot agent
+├── scripts.d.ts                  # TypeScript: declare module '*.script.js'
+└── index.ts                      # Re-exports scripts as strings
+```
+
+### How It Works
+
+1. **Wrangler rule** in `wrangler.toml`:
+   ```toml
+   [[rules]]
+   type = "Text"
+   globs = ["**/*.script.js"]
+   fallthrough = true
+   ```
+
+2. **Import as text** in TypeScript:
+   ```typescript
+   import PERSISTENT_SERVER_SCRIPT from './persistent-server.script.js';
+   // PERSISTENT_SERVER_SCRIPT is now a string containing the file contents
+   ```
+
+3. **Write to container** at runtime via Sandbox SDK's `writeFile()` or `startProcess()`
+
+### Adding a New Script
+
+1. Create `src/scripts/my-script.script.js` (use `.script.js` extension)
+2. Write normal JavaScript with shebang:
+   ```javascript
+   #!/usr/bin/env node
+   // Your script here - full syntax highlighting!
+   ```
+3. Export from `src/scripts/index.ts`:
+   ```typescript
+   import MY_SCRIPT from './my-script.script.js';
+   export { MY_SCRIPT };
+   ```
+4. Use in handler: write to container filesystem, then execute
 
 ---
 

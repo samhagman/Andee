@@ -1,11 +1,6 @@
----
-name: telegram-mini-app-dev
-description: Guide for building Telegram Mini Apps that integrate with Andee bot. Use when creating new Mini Apps, debugging data passing issues, or understanding the Direct Link Mini App convention.
----
-
 # Telegram Mini App Development Guide
 
-This skill documents patterns for building Telegram Mini App components using the Vite + TypeScript framework.
+This guide documents patterns for building Telegram Mini App components using the Vite + TypeScript framework.
 
 ## Architecture
 

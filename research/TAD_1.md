@@ -1,3 +1,5 @@
+> **Note:** This file and related research documents have been moved to `/research/`
+
 # TAD_1: Claude Code Telegram Bot - End-to-End Demo Plan
 
 > **Goal**: Get a working Telegram bot that connects to Claude Code Agent SDK, allowing you to message Claude from your phone with full conversation persistence.

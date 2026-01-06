@@ -1,3 +1,5 @@
+> **Note:** This file and related research documents have been moved to `/research/`
+
 # TAD_3: Claude Code Telegram Bot - Production Deployment
 
 > **Goal**: Deploy the Claude Telegram Bot to Cloudflare's edge infrastructure for 24/7 availability, with persistent session storage and proper secrets management.

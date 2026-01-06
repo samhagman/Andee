@@ -1,11 +1,11 @@
 ---
-name: andee-ops
-description: Deploys and configures Andee on Cloudflare Workers. Covers wrangler commands, secrets, webhooks, container instance types, and R2 setup. Use when deploying to production, setting secrets, configuring webhooks, or changing container sizes. For building features or debugging runtime issues, use andee-dev instead.
+name: deploying-andee
+description: Deploys and configures Andee on Cloudflare Workers. Covers wrangler commands, secrets, webhooks, container instance types, and R2 setup. Use when deploying to production, setting secrets, configuring webhooks, or changing container sizes. For building features or debugging runtime issues, use developing-andee instead.
 ---
 
 # Andee Deployment Guide
 
-> For building features or debugging issues, see the `andee-dev` skill.
+> For building features or debugging issues, see the `developing-andee` skill.
 
 ## Contents
 
@@ -87,7 +87,7 @@ curl -sI "https://andee-7rd.pages.dev/assets/" | head -1
 
 ### Adding New Components
 
-After adding a new component (see `andee-dev` skill for guide):
+After adding a new component (see `developing-andee` skill for guide):
 
 1. Add entry to `apps/vite.config.ts`
 2. Run `npm run typecheck` to verify
@@ -203,21 +203,53 @@ const sandbox = await this.env.SANDBOX.get(sandboxId, { sleepAfter: "1h" });
 
 ### Bucket Setup
 
-The `andee-sessions` R2 bucket stores session data. Configured in `wrangler.toml`:
+Three R2 buckets are used. Configured in `wrangler.toml`:
 
 ```toml
+# Session storage (shared with telegram bot)
 [[r2_buckets]]
 binding = "SESSIONS"
 bucket_name = "andee-sessions"
+
+# Filesystem snapshots (backup/restore workspace)
+[[r2_buckets]]
+binding = "SNAPSHOTS"
+bucket_name = "andee-snapshots"
+
+# Transcripts (optional, not actively used)
+[[r2_buckets]]
+binding = "TRANSCRIPTS"
+bucket_name = "andee-transcripts"
 ```
 
-### Session Storage Structure
+### Create Buckets (if needed)
+
+```bash
+cd claude-sandbox-worker
+npx wrangler r2 bucket create andee-sessions
+npx wrangler r2 bucket create andee-snapshots
+npx wrangler r2 bucket create andee-transcripts
+```
+
+### Storage Structure
 
 ```
 andee-sessions/
 └── sessions/
-    └── {chatId}.json    # Contains claudeSessionId, messageCount
+    └── {chatId}.json           # Claude sessionId, messageCount
+
+andee-snapshots/
+└── snapshots/
+    └── {chatId}/
+        └── {timestamp}.tar.gz  # Filesystem backups (/workspace + /home/claude)
 ```
+
+### Snapshot Lifecycle
+
+- **Auto-snapshot**: 55 minutes after last activity (before container sleeps)
+- **Pre-reset snapshot**: Automatically created when /reset is called
+- **Manual snapshot**: Via /snapshot Telegram command or POST /snapshot endpoint
+- **Restore**: Happens automatically when a fresh container starts for a chatId that has snapshots
 
 ---
 
@@ -238,9 +270,9 @@ service = "claude-sandbox-worker"
 ```typescript
 // In telegram bot worker
 const response = await env.SANDBOX.fetch(
-  new Request("https://sandbox/ask-telegram", {
+  new Request("https://sandbox/ask", {
     method: "POST",
-    body: JSON.stringify({ chatId, message, botToken })
+    body: JSON.stringify({ chatId, message, botToken, userMessageId })
   })
 );
 ```
@@ -296,8 +328,8 @@ npx wrangler r2 bucket create andee-sessions
 ## Key Code Locations
 
 Key code locations in `claude-sandbox-worker/src/index.ts`:
-- `PERSISTENT_SERVER_SCRIPT` (~line 377) - HTTP server with streaming input mode
-- `/ask-telegram` endpoint (~line 938) - Uses `startProcess()` + `waitForPort(8080)`
+- `PERSISTENT_SERVER_SCRIPT` - HTTP server with streaming input mode
+- `/ask` endpoint - Uses `startProcess()` + `waitForPort(8080)`
 - `getSandbox(..., { sleepAfter: "1h" })` - Container lifecycle config
 
 Key config files:

@@ -1,3 +1,5 @@
+> **Note:** This file and related research documents have been moved to `/research/`
+
 # TAD_2: Claude Code Telegram Bot - Local Sandbox Isolation
 
 > **Goal**: Add isolation by running Claude Code inside Docker containers using the Cloudflare Sandbox SDK, while keeping the Grammy bot running locally with long-polling.

@@ -1,9 +1,4 @@
-/**
- * Persistent server script - runs an HTTP server that keeps Claude alive between messages.
- * Uses streaming input mode with async generator for message passing.
- * This provides ~50% faster response times for subsequent messages.
- */
-export const PERSISTENT_SERVER_SCRIPT = `#!/usr/bin/env node
+#!/usr/bin/env node
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createServer } from "http";
@@ -16,48 +11,48 @@ const LOG_FILE = "/workspace/telegram_agent.log";
 // Converts Claude's natural markdown to Telegram-compatible MarkdownV2
 function escapeMarkdownV2(text) {
   // Characters that need escaping in MarkdownV2 (outside of code blocks)
-  // _ * [ ] ( ) ~ \` > # + - = | { } . !
+  // _ * [ ] ( ) ~ ` > # + - = | { } . !
 
   // First, handle code blocks - extract and protect them
   const codeBlockPlaceholders = [];
-  let processed = text.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, (match) => {
+  let processed = text.replace(/```([\s\S]*?)```/g, (match) => {
     codeBlockPlaceholders.push(match);
     return "%%CODEBLOCK" + (codeBlockPlaceholders.length - 1) + "%%";
   });
 
   // Handle inline code
   const inlineCodePlaceholders = [];
-  processed = processed.replace(/\\\`([^\\\`]+)\\\`/g, (match) => {
+  processed = processed.replace(/`([^`]+)`/g, (match) => {
     inlineCodePlaceholders.push(match);
     return "%%INLINECODE" + (inlineCodePlaceholders.length - 1) + "%%";
   });
 
   // Handle markdown links [text](url) - protect them and escape URL chars
   const linkPlaceholders = [];
-  processed = processed.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (match, linkText, url) => {
+  processed = processed.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
     // Escape special chars in link text (but allow formatting)
     const escapedText = linkText
-      .replace(/\\\\/g, "\\\\\\\\")
-      .replace(/_/g, "\\\\_")
-      .replace(/\\*/g, "\\\\*")
-      .replace(/\\[/g, "\\\\[")
-      .replace(/\\]/g, "\\\\]")
-      .replace(/\\(/g, "\\\\(")
-      .replace(/\\)/g, "\\\\)")
-      .replace(/~/g, "\\\\~")
-      .replace(/>/g, "\\\\>")
-      .replace(/#/g, "\\\\#")
-      .replace(/\\+/g, "\\\\+")
-      .replace(/-/g, "\\\\-")
-      .replace(/=/g, "\\\\=")
-      .replace(/\\|/g, "\\\\|")
-      .replace(/\\{/g, "\\\\{")
-      .replace(/\\}/g, "\\\\}")
-      .replace(/\\./g, "\\\\.")
-      .replace(/!/g, "\\\\!");
+      .replace(/\\/g, "\\\\")
+      .replace(/_/g, "\\_")
+      .replace(/\*/g, "\\*")
+      .replace(/\[/g, "\\[")
+      .replace(/\]/g, "\\]")
+      .replace(/\(/g, "\\(")
+      .replace(/\)/g, "\\)")
+      .replace(/~/g, "\\~")
+      .replace(/>/g, "\\>")
+      .replace(/#/g, "\\#")
+      .replace(/\+/g, "\\+")
+      .replace(/-/g, "\\-")
+      .replace(/=/g, "\\=")
+      .replace(/\|/g, "\\|")
+      .replace(/\{/g, "\\{")
+      .replace(/\}/g, "\\}")
+      .replace(/\./g, "\\.")
+      .replace(/!/g, "\\!");
 
-    // In URLs, only escape ) and \\
-    const escapedUrl = url.replace(/\\\\/g, "\\\\\\\\").replace(/\\)/g, "\\\\)");
+    // In URLs, only escape ) and \
+    const escapedUrl = url.replace(/\\/g, "\\\\").replace(/\)/g, "\\)");
 
     const formattedLink = "[" + escapedText + "](" + escapedUrl + ")";
     linkPlaceholders.push(formattedLink);
@@ -65,55 +60,55 @@ function escapeMarkdownV2(text) {
   });
 
   // Convert **bold** to *bold* (Telegram uses single asterisks)
-  processed = processed.replace(/\\*\\*(.+?)\\*\\*/g, "*\$1*");
+  processed = processed.replace(/\*\*(.+?)\*\*/g, "*$1*");
 
   // Convert ~~strikethrough~~ to ~strikethrough~
-  processed = processed.replace(/~~(.+?)~~/g, "~\$1~");
+  processed = processed.replace(/~~(.+?)~~/g, "~$1~");
 
   // Handle italic text _content_ - protect before escaping
   const italicPlaceholders = [];
-  processed = processed.replace(/_([^_\\n]+)_/g, (match, content) => {
+  processed = processed.replace(/_([^_\n]+)_/g, (match, content) => {
     // Escape special chars in content (but NOT underscore - we're preserving the italic formatting)
     const escapedContent = content
-      .replace(/\\\\/g, "\\\\\\\\")
-      .replace(/\\[/g, "\\\\[")
-      .replace(/\\]/g, "\\\\]")
-      .replace(/\\(/g, "\\\\(")
-      .replace(/\\)/g, "\\\\)")
-      .replace(/>/g, "\\\\>")
-      .replace(/#/g, "\\\\#")
-      .replace(/\\+/g, "\\\\+")
-      .replace(/-/g, "\\\\-")
-      .replace(/=/g, "\\\\=")
-      .replace(/\\|/g, "\\\\|")
-      .replace(/\\{/g, "\\\\{")
-      .replace(/\\}/g, "\\\\}")
-      .replace(/\\./g, "\\\\.")
-      .replace(/!/g, "\\\\!");
+      .replace(/\\/g, "\\\\")
+      .replace(/\[/g, "\\[")
+      .replace(/\]/g, "\\]")
+      .replace(/\(/g, "\\(")
+      .replace(/\)/g, "\\)")
+      .replace(/>/g, "\\>")
+      .replace(/#/g, "\\#")
+      .replace(/\+/g, "\\+")
+      .replace(/-/g, "\\-")
+      .replace(/=/g, "\\=")
+      .replace(/\|/g, "\\|")
+      .replace(/\{/g, "\\{")
+      .replace(/\}/g, "\\}")
+      .replace(/\./g, "\\.")
+      .replace(/!/g, "\\!");
     const formattedItalic = "_" + escapedContent + "_";
     italicPlaceholders.push(formattedItalic);
     return "%%ITALIC" + (italicPlaceholders.length - 1) + "%%";
   });
 
   // Escape special characters (NOT underscore - italics already handled above)
-  // Must escape: [ ] ( ) ~ > # + - = | { } . ! \\
+  // Must escape: [ ] ( ) ~ > # + - = | { } . ! \
   processed = processed
-    .replace(/\\\\/g, "\\\\\\\\")  // Backslash first
-    .replace(/_/g, "\\\\_")  // Escape remaining underscores (not part of italic formatting)
-    .replace(/\\[/g, "\\\\[")
-    .replace(/\\]/g, "\\\\]")
-    .replace(/\\(/g, "\\\\(")
-    .replace(/\\)/g, "\\\\)")
-    .replace(/>/g, "\\\\>")
-    .replace(/#/g, "\\\\#")
-    .replace(/\\+/g, "\\\\+")
-    .replace(/(?<!\\\\)-/g, "\\\\-")  // Dash (but not already escaped)
-    .replace(/=/g, "\\\\=")
-    .replace(/\\|/g, "\\\\|")
-    .replace(/\\{/g, "\\\\{")
-    .replace(/\\}/g, "\\\\}")
-    .replace(/\\./g, "\\\\.")
-    .replace(/!/g, "\\\\!");
+    .replace(/\\/g, "\\\\")  // Backslash first
+    .replace(/_/g, "\\_")  // Escape remaining underscores (not part of italic formatting)
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/>/g, "\\>")
+    .replace(/#/g, "\\#")
+    .replace(/\+/g, "\\+")
+    .replace(/(?<!\\)-/g, "\\-")  // Dash (but not already escaped)
+    .replace(/=/g, "\\=")
+    .replace(/\|/g, "\\|")
+    .replace(/\{/g, "\\{")
+    .replace(/\}/g, "\\}")
+    .replace(/\./g, "\\.")
+    .replace(/!/g, "\\!");
 
   // Restore italics
   italicPlaceholders.forEach((italic, i) => {
@@ -146,24 +141,34 @@ let resolveNextMessage = null;
 let currentRequestContext = null;
 let typingInterval = null;
 
+// Auto-snapshot state
+let lastActivityTime = Date.now();
+let hasAutoSnapshotted = false;
+let lastKnownWorkerUrl = null;
+let lastKnownChatId = null;
+let lastKnownSenderId = null;
+let lastKnownIsGroup = null;
+const AUTO_SNAPSHOT_AFTER_MS = 55 * 60 * 1000; // 55 minutes
+const SNAPSHOT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
+
 // Timestamped logging
 function log(msg) {
   const ts = new Date().toISOString();
-  const line = \`[\${ts}] \${msg}\`;
+  const line = `[${ts}] ${msg}`;
   console.error(line);
-  appendFileSync(LOG_FILE, line + "\\n");
+  appendFileSync(LOG_FILE, line + "\n");
 }
 
 // Send typing indicator to Telegram
 async function sendTypingIndicator(botToken, chatId) {
   try {
-    await fetch(\`https://api.telegram.org/bot\${botToken}/sendChatAction\`, {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
   } catch (err) {
-    log(\`TYPING_ERROR: \${err.message}\`);
+    log(`TYPING_ERROR: ${err.message}`);
   }
 }
 
@@ -200,14 +205,14 @@ async function sendToTelegram(text, botToken, chatId) {
       chunks.push(remaining);
       break;
     }
-    let idx = remaining.lastIndexOf("\\n", maxLen);
+    let idx = remaining.lastIndexOf("\n", maxLen);
     if (idx === -1 || idx < maxLen / 2) idx = maxLen;
     chunks.push(remaining.substring(0, idx));
     remaining = remaining.substring(idx).trimStart();
   }
 
   for (const chunk of chunks) {
-    await fetch(\`https://api.telegram.org/bot\${botToken}/sendMessage\`, {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -221,7 +226,7 @@ async function sendToTelegram(text, botToken, chatId) {
 }
 
 async function removeReaction(botToken, chatId, messageId) {
-  await fetch(\`https://api.telegram.org/bot\${botToken}/setMessageReaction\`, {
+  await fetch(`https://api.telegram.org/bot${botToken}/setMessageReaction`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -232,12 +237,74 @@ async function removeReaction(botToken, chatId, messageId) {
   }).catch(() => {});
 }
 
+// Create and upload auto-snapshot
+async function createAutoSnapshot() {
+  if (!lastKnownWorkerUrl || !lastKnownChatId || lastKnownSenderId === null) {
+    log("AUTO_SNAPSHOT skipped: missing context (workerUrl, chatId, or senderId)");
+    return false;
+  }
+
+  try {
+    log("AUTO_SNAPSHOT creating...");
+
+    // Create tar archive of workspace and home
+    const { execSync } = await import("child_process");
+    const snapshotPath = "/tmp/auto_snapshot.tar.gz";
+
+    // Check what directories exist and have content
+    const dirsToBackup = [];
+    try {
+      execSync("test -d /workspace && ls -A /workspace | head -1", { encoding: "utf8" });
+      dirsToBackup.push("/workspace");
+    } catch {}
+    try {
+      execSync("test -d /home/claude && ls -A /home/claude | head -1", { encoding: "utf8" });
+      dirsToBackup.push("/home/claude");
+    } catch {}
+
+    if (dirsToBackup.length === 0) {
+      log("AUTO_SNAPSHOT skipped: no content to backup");
+      return false;
+    }
+
+    // Create tar archive
+    execSync(`tar -czf ${snapshotPath} ${dirsToBackup.join(" ")} 2>/dev/null || true`);
+
+    // Read the tar file
+    const { readFileSync } = await import("fs");
+    const tarData = readFileSync(snapshotPath);
+
+    // Upload to worker via POST /snapshot
+    const response = await fetch(`${lastKnownWorkerUrl}/snapshot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chatId: lastKnownChatId,
+        senderId: lastKnownSenderId,
+        isGroup: lastKnownIsGroup
+      })
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      log(`AUTO_SNAPSHOT success: ${result.key || "uploaded"}`);
+      return true;
+    } else {
+      log(`AUTO_SNAPSHOT failed: ${response.status}`);
+      return false;
+    }
+  } catch (err) {
+    log(`AUTO_SNAPSHOT error: ${err.message}`);
+    return false;
+  }
+}
+
 // Async generator that yields messages as they arrive
 async function* messageGenerator() {
   while (true) {
     log("GENERATOR waiting for message...");
     const msg = await waitForNextMessage();
-    log(\`GENERATOR yielding message: \${msg.text.substring(0, 50)}...\`);
+    log(`GENERATOR yielding message: ${msg.text.substring(0, 50)}...`);
 
     // Store context for response handling
     currentRequestContext = msg;
@@ -263,7 +330,7 @@ async function* messageGenerator() {
 
 // HTTP server to receive messages
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, \`http://localhost:\${PORT}\`);
+  const url = new URL(req.url, `http://localhost:${PORT}`);
 
   // Health check
   if (req.method === "GET" && url.pathname === "/health") {
@@ -298,23 +365,33 @@ const server = createServer(async (req, res) => {
 
     try {
       const data = JSON.parse(body);
-      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId } = data;
+      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup } = data;
 
-      log(\`MESSAGE received: chat=\${chatId} text=\${text.substring(0, 30)}...\`);
+      log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${text.substring(0, 30)}...`);
+
+      // Track context for auto-snapshot and session updates
+      lastKnownWorkerUrl = workerUrl;
+      lastKnownChatId = chatId;
+      lastKnownSenderId = senderId;
+      lastKnownIsGroup = isGroup;
+
+      // Reset activity tracking on new message
+      lastActivityTime = Date.now();
+      hasAutoSnapshotted = false;
 
       // If this is the first message and we have a session ID to resume, update our state
       if (claudeSessionId && !sessionId) {
         sessionId = claudeSessionId;
-        log(\`RESUME session=\${sessionId}\`);
+        log(`RESUME session=${sessionId}`);
       }
 
       // Add to queue - the generator will pick it up
-      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl });
+      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup });
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ queued: true, queueLength: messageQueue.length + 1 }));
     } catch (err) {
-      log(\`ERROR parsing message: \${err.message}\`);
+      log(`ERROR parsing message: ${err.message}`);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: err.message }));
     }
@@ -333,6 +410,21 @@ async function main() {
     log("SERVER ready on port " + PORT);
   });
 
+  // Start auto-snapshot timer
+  setInterval(async () => {
+    const idleTime = Date.now() - lastActivityTime;
+    const idleMinutes = Math.floor(idleTime / 60000);
+
+    if (idleTime > AUTO_SNAPSHOT_AFTER_MS && !hasAutoSnapshotted && !isProcessing) {
+      log(`AUTO_SNAPSHOT triggered after ${idleMinutes} minutes idle`);
+      const success = await createAutoSnapshot();
+      if (success) {
+        hasAutoSnapshotted = true;
+      }
+    }
+  }, SNAPSHOT_CHECK_INTERVAL_MS);
+
+  log("AUTO_SNAPSHOT timer started (check every 5 min, trigger at 55 min idle)");
   log("CLAUDE starting query loop with streaming input...");
 
   try {
@@ -359,7 +451,7 @@ async function main() {
       // Capture session ID
       if (msg.type === "system" && msg.subtype === "init") {
         sessionId = msg.session_id;
-        log(\`SESSION id=\${sessionId}\`);
+        log(`SESSION id=${sessionId}`);
       }
 
       // Log tool usage
@@ -367,7 +459,7 @@ async function main() {
         isProcessing = true;
         for (const block of msg.message.content) {
           if (block.type === "tool_use") {
-            log(\`TOOL_START name=\${block.name}\`);
+            log(`TOOL_START name=${block.name}`);
           }
         }
       }
@@ -375,7 +467,7 @@ async function main() {
       if (msg.type === "user" && msg.message?.content) {
         for (const block of msg.message.content) {
           if (block.type === "tool_result") {
-            log(\`TOOL_END id=\${block.tool_use_id}\`);
+            log(`TOOL_END id=${block.tool_use_id}`);
           }
         }
       }
@@ -395,9 +487,9 @@ async function main() {
         if (ctx) {
           const responseText = msg.subtype === "success"
             ? msg.result
-            : \`Error: \${msg.subtype}\${msg.errors ? "\\n" + msg.errors.join("\\n") : ""}\`;
+            : `Error: ${msg.subtype}${msg.errors ? "\n" + msg.errors.join("\n") : ""}`;
 
-          log(\`COMPLETE cost=$\${msg.total_cost_usd?.toFixed(4)} chars=\${responseText.length}\`);
+          log(`COMPLETE cost=$${msg.total_cost_usd?.toFixed(4)} chars=${responseText.length}`);
 
           // Send to Telegram
           await sendToTelegram(responseText, ctx.botToken, ctx.chatId);
@@ -409,14 +501,19 @@ async function main() {
           // Update R2 session
           if (sessionId && ctx.workerUrl) {
             try {
-              await fetch(\`\${ctx.workerUrl}/session-update\`, {
+              await fetch(`${ctx.workerUrl}/session-update`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ chatId: ctx.chatId, claudeSessionId: sessionId })
+                body: JSON.stringify({
+                  chatId: ctx.chatId,
+                  claudeSessionId: sessionId,
+                  senderId: ctx.senderId,
+                  isGroup: ctx.isGroup
+                })
               });
               log("R2_SESSION_UPDATED");
             } catch (e) {
-              log(\`R2_SESSION_FAILED: \${e.message}\`);
+              log(`R2_SESSION_FAILED: ${e.message}`);
             }
           }
 
@@ -425,12 +522,12 @@ async function main() {
       }
     }
   } catch (err) {
-    log(\`FATAL: \${err.message}\`);
+    log(`FATAL: ${err.message}`);
 
     // Try to notify user if we have context
     if (currentRequestContext) {
       const ctx = currentRequestContext;
-      await sendToTelegram(\`Server error: \${err.message}\`, ctx.botToken, ctx.chatId);
+      await sendToTelegram(`Server error: ${err.message}`, ctx.botToken, ctx.chatId);
       await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
     }
 
@@ -439,7 +536,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  log(\`STARTUP_ERROR: \${err.message}\`);
+  log(`STARTUP_ERROR: ${err.message}`);
   process.exit(1);
 });
-`;

@@ -70,6 +70,7 @@ From the API response, extract:
 2. **DO NOT include Sources section** - no citations, no links to data sources
 3. **Use `**bold**` for headers** - NOT `###` markdown headers (they show as literal `###` text)
 4. Use `_italic_` for alerts
+5. **NO PREAMBLE** - Start DIRECTLY with the weather header. Do not add introductory text like "Based on the weather data...", "Here's the weather...", or "Let me create..."
 
 **CRITICAL: USE SPECIFIC TIMES, NOT VAGUE PERIODS**
 
@@ -94,14 +95,16 @@ _{Alert emoji} {Alert type}: {description} starting around {SPECIFIC TIME}_
 
 Ranging {low}°C to {high}°C ({low_f}°F to {high_f}°F).
 
-• {emoji} {weather_type} ({START_HOUR}-{END_HOUR})
-• {emoji} {weather_type} ({START_HOUR}-{END_HOUR})
-• {emoji} {weather_type} ({START_HOUR}-{END_HOUR})
+• {weather_emoji} {weather_type} ({START_HOUR}-{END_HOUR})
+• {weather_emoji} {weather_type} ({START_HOUR}-{END_HOUR})
+• {weather_emoji} {weather_type} ({START_HOUR}-{END_HOUR})
 
 {Clothing recommendation}.
 
 [View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_{BASE64URL_JSON})
 ```
+
+**IMPORTANT:** Use the emoji from the Weather Code Reference table for each weather condition. Example: ☁️ for Overcast, ⛅ for Partly Cloudy, 🌨️ for Snow.
 
 **Example response (with weather event):**
 ```
@@ -111,10 +114,10 @@ _Snow Alert: Snow showers expected starting around 7pm_
 
 Ranging -10°C to -3°C (14°F to 27°F).
 
-• Clear/Partly Cloudy (6am-6pm)
-• Snow Showers (7pm-11pm)
+• ⛅ Clear/Partly Cloudy (6am-6pm)
+• 🌨️ Snow Showers (7pm-11pm)
 
-Layer up with 3-4 layers, wear a scarf and gloves, and bring boots for the evening snow!
+Layer up with 4 layers, wear a scarf and gloves, and bring boots for the evening snow!
 
 [View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...)
 ```
@@ -125,10 +128,10 @@ Layer up with 3-4 layers, wear a scarf and gloves, and bring boots for the eveni
 
 Ranging -5°C to 3°C (23°F to 37°F).
 
-• Overcast (12am-6am)
-• Light Snow (7am-10am)
-• Partly Cloudy (11am-4pm)
-• Cloudy (5pm-11pm)
+• ☁️ Overcast (12am-6am)
+• 🌨️ Light Snow (7am-10am)
+• ⛅ Partly Cloudy (11am-4pm)
+• ☁️ Cloudy (5pm-11pm)
 
 Light jacket with a hat for the morning snow.
 
@@ -141,8 +144,8 @@ Light jacket with a hat for the morning snow.
 
 Ranging 5°C to 12°C (41°F to 54°F).
 
-• Overcast (6am-3pm)
-• Partly Cloudy (4pm-9pm)
+• ☁️ Overcast (6am-3pm)
+• ⛅ Partly Cloudy (4pm-9pm)
 
 A light jacket should be fine today.
 
@@ -202,18 +205,18 @@ Full link: `[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=we
 
 | Code | Weather | Emoji |
 |------|---------|-------|
-| 0 | Clear sky | |
-| 1 | Mainly clear | |
-| 2 | Partly cloudy | |
-| 3 | Overcast | |
-| 45, 48 | Fog | |
-| 51, 53, 55 | Drizzle | |
-| 61, 63, 65 | Rain | |
-| 71, 73, 75 | Snow | |
-| 77 | Snow grains | |
-| 80, 81, 82 | Rain showers | |
-| 85, 86 | Snow showers | |
-| 95 | Thunderstorm | |
+| 0 | Clear sky | ☀️ |
+| 1 | Mainly clear | 🌤️ |
+| 2 | Partly cloudy | ⛅ |
+| 3 | Overcast | ☁️ |
+| 45, 48 | Fog | 🌫️ |
+| 51, 53, 55 | Drizzle | 🌦️ |
+| 61, 63, 65 | Rain | 🌧️ |
+| 71, 73, 75 | Snow | 🌨️ |
+| 77 | Snow grains | 🌨️ |
+| 80, 81, 82 | Rain showers | 🌧️ |
+| 85, 86 | Snow showers | 🌨️ |
+| 95 | Thunderstorm | ⛈️ |
 
 ## Clothing Recommendations
 

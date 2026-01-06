@@ -14,15 +14,27 @@ export interface AskTelegramRequest {
   claudeSessionId: string | null;
   botToken: string;
   userMessageId: number;
+  senderId: string;
+  isGroup: boolean;
 }
 
 export interface ResetRequest {
   chatId: string;
+  senderId: string;
+  isGroup: boolean;
 }
 
 export interface SessionUpdateRequest {
   chatId: string;
   claudeSessionId: string;
+  senderId: string;
+  isGroup: boolean;
+}
+
+export interface SnapshotRequest {
+  chatId: string;
+  senderId: string;
+  isGroup: boolean;
 }
 
 /**

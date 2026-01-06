@@ -37,3 +37,15 @@ bucket_name = "andee-transcripts"
 [[r2_buckets]]
 binding = "SESSIONS"
 bucket_name = "andee-sessions"
+
+# R2 binding for filesystem snapshots (backup/restore workspace)
+[[r2_buckets]]
+binding = "SNAPSHOTS"
+bucket_name = "andee-snapshots"
+
+# Import .script.js files as raw text (for container scripts)
+# These scripts run inside Docker containers, not in the Worker runtime
+[[rules]]
+type = "Text"
+globs = ["**/*.script.js"]
+fallthrough = true

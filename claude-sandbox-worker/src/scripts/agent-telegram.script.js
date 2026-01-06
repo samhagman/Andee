@@ -1,56 +1,52 @@
-/**
- * Telegram agent script - runs query AND sends to Telegram directly.
- * Used for background execution with fire-and-forget semantics.
- */
-export const AGENT_TELEGRAM_SCRIPT = `#!/usr/bin/env node
+#!/usr/bin/env node
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync, writeFileSync, appendFileSync } from "fs";
 
 const input = JSON.parse(readFileSync("/workspace/input.json", "utf-8"));
-const { message, claudeSessionId, botToken, chatId, userMessageId, workerUrl } = input;
+const { message, claudeSessionId, botToken, chatId, userMessageId, workerUrl, senderId, isGroup } = input;
 
 // Timestamped logging
 function log(msg) {
   const ts = new Date().toISOString();
-  const line = \`[\${ts}] \${msg}\`;
+  const line = `[${ts}] ${msg}`;
   console.error(line);
-  appendFileSync("/workspace/telegram_agent.log", line + "\\n");
+  appendFileSync("/workspace/telegram_agent.log", line + "\n");
 }
 
 // Escape text for Telegram MarkdownV2 format
 function escapeMarkdownV2(text) {
   const codeBlockPlaceholders = [];
-  let processed = text.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, (match) => {
+  let processed = text.replace(/```([\s\S]*?)```/g, (match) => {
     codeBlockPlaceholders.push(match);
     return "%%CODEBLOCK" + (codeBlockPlaceholders.length - 1) + "%%";
   });
 
   const inlineCodePlaceholders = [];
-  processed = processed.replace(/\\\`([^\\\`]+)\\\`/g, (match) => {
+  processed = processed.replace(/`([^`]+)`/g, (match) => {
     inlineCodePlaceholders.push(match);
     return "%%INLINECODE" + (inlineCodePlaceholders.length - 1) + "%%";
   });
 
-  processed = processed.replace(/\\*\\*(.+?)\\*\\*/g, "*\$1*");
-  processed = processed.replace(/~~(.+?)~~/g, "~\$1~");
+  processed = processed.replace(/\*\*(.+?)\*\*/g, "*$1*");
+  processed = processed.replace(/~~(.+?)~~/g, "~$1~");
 
   processed = processed
-    .replace(/\\\\/g, "\\\\\\\\")
-    .replace(/\\[/g, "\\\\[")
-    .replace(/\\]/g, "\\\\]")
-    .replace(/\\(/g, "\\\\(")
-    .replace(/\\)/g, "\\\\)")
-    .replace(/>/g, "\\\\>")
-    .replace(/#/g, "\\\\#")
-    .replace(/\\+/g, "\\\\+")
-    .replace(/(?<!\\\\)-/g, "\\\\-")
-    .replace(/=/g, "\\\\=")
-    .replace(/\\|/g, "\\\\|")
-    .replace(/\\{/g, "\\\\{")
-    .replace(/\\}/g, "\\\\}")
-    .replace(/\\./g, "\\\\.")
-    .replace(/!/g, "\\\\!");
+    .replace(/\\/g, "\\\\")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/>/g, "\\>")
+    .replace(/#/g, "\\#")
+    .replace(/\+/g, "\\+")
+    .replace(/(?<!\\)-/g, "\\-")
+    .replace(/=/g, "\\=")
+    .replace(/\|/g, "\\|")
+    .replace(/\{/g, "\\{")
+    .replace(/\}/g, "\\}")
+    .replace(/\./g, "\\.")
+    .replace(/!/g, "\\!");
 
   codeBlockPlaceholders.forEach((block, i) => {
     processed = processed.replace("%%CODEBLOCK" + i + "%%", block);
@@ -72,14 +68,14 @@ async function sendToTelegram(text) {
       chunks.push(remaining);
       break;
     }
-    let idx = remaining.lastIndexOf("\\n", maxLen);
+    let idx = remaining.lastIndexOf("\n", maxLen);
     if (idx === -1 || idx < maxLen / 2) idx = maxLen;
     chunks.push(remaining.substring(0, idx));
     remaining = remaining.substring(idx).trimStart();
   }
 
   for (const chunk of chunks) {
-    await fetch(\`https://api.telegram.org/bot\${botToken}/sendMessage\`, {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -93,7 +89,7 @@ async function sendToTelegram(text) {
 }
 
 async function removeReaction() {
-  await fetch(\`https://api.telegram.org/bot\${botToken}/setMessageReaction\`, {
+  await fetch(`https://api.telegram.org/bot${botToken}/setMessageReaction`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -109,7 +105,7 @@ async function main() {
   let response = "";
   let errorMessage = "";
 
-  log(\`START chat=\${chatId} resume=\${claudeSessionId ? "yes" : "no"}\`);
+  log(`START chat=${chatId} resume=${claudeSessionId ? "yes" : "no"}`);
   const startTime = Date.now();
 
   try {
@@ -135,14 +131,14 @@ async function main() {
     })) {
       if (msg.type === "system" && msg.subtype === "init") {
         sessionId = msg.session_id;
-        log(\`SESSION id=\${sessionId}\`);
+        log(`SESSION id=${sessionId}`);
       }
 
       // Log tool usage for timing analysis
       if (msg.type === "assistant" && msg.message?.content) {
         for (const block of msg.message.content) {
           if (block.type === "tool_use") {
-            log(\`TOOL_START name=\${block.name}\`);
+            log(`TOOL_START name=${block.name}`);
           }
         }
       }
@@ -150,7 +146,7 @@ async function main() {
       if (msg.type === "user" && msg.message?.content) {
         for (const block of msg.message.content) {
           if (block.type === "tool_result") {
-            log(\`TOOL_END id=\${block.tool_use_id}\`);
+            log(`TOOL_END id=${block.tool_use_id}`);
           }
         }
       }
@@ -159,28 +155,28 @@ async function main() {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         if (msg.subtype === "success") {
           response = msg.result;
-          log(\`COMPLETE elapsed=\${elapsed}s cost=$\${msg.total_cost_usd?.toFixed(4)} chars=\${response.length}\`);
+          log(`COMPLETE elapsed=${elapsed}s cost=$${msg.total_cost_usd?.toFixed(4)} chars=${response.length}`);
         } else {
-          errorMessage = \`Query ended with: \${msg.subtype}\`;
+          errorMessage = `Query ended with: ${msg.subtype}`;
           if (msg.errors) {
-            errorMessage += "\\n" + msg.errors.join("\\n");
+            errorMessage += "\n" + msg.errors.join("\n");
           }
-          log(\`ERROR elapsed=\${elapsed}s subtype=\${msg.subtype}\`);
+          log(`ERROR elapsed=${elapsed}s subtype=${msg.subtype}`);
         }
       }
     }
   } catch (error) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    log(\`EXCEPTION elapsed=\${elapsed}s error=\${error.message}\`);
+    log(`EXCEPTION elapsed=${elapsed}s error=${error.message}`);
     errorMessage = error.message || "Unknown error";
   }
 
   const responseText = response || errorMessage || "No response from Claude";
 
   // Send to Telegram
-  log(\`TELEGRAM_SEND chars=\${responseText.length}\`);
+  log(`TELEGRAM_SEND chars=${responseText.length}`);
   await sendToTelegram(responseText);
-  log(\`TELEGRAM_SENT\`);
+  log(`TELEGRAM_SENT`);
 
   // Remove reaction
   await removeReaction();
@@ -196,23 +192,22 @@ async function main() {
   // Update session in R2 via worker endpoint
   if (sessionId && workerUrl) {
     try {
-      await fetch(\`\${workerUrl}/session-update\`, {
+      await fetch(`${workerUrl}/session-update`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, claudeSessionId: sessionId })
+        body: JSON.stringify({ chatId, claudeSessionId: sessionId, senderId, isGroup })
       });
-      log(\`R2_SESSION_UPDATED\`);
+      log(`R2_SESSION_UPDATED`);
     } catch (e) {
-      log(\`R2_SESSION_FAILED error=\${e.message}\`);
+      log(`R2_SESSION_FAILED error=${e.message}`);
     }
   }
 
-  log(\`DONE\`);
+  log(`DONE`);
 }
 
 main().catch(async (err) => {
-  log(\`FATAL error=\${err.message}\`);
-  await sendToTelegram(\`Error: \${err.message || "Unknown error"}\`);
+  log(`FATAL error=${err.message}`);
+  await sendToTelegram(`Error: ${err.message || "Unknown error"}`);
   await removeReaction();
 });
-`;

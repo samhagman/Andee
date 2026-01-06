@@ -578,8 +578,8 @@ and saved a Thai Basil Chicken recipe.
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │  CONTEXT                                                        │   │
-│  │  • Link to andee-dev skill (how to add skills/mini apps)       │   │
-│  │  • Link to andee-ops skill (how to test/deploy)                │   │
+│  │  • Link to developing-andee skill (how to add skills/mini apps)│   │
+│  │  • Link to deploying-andee skill (how to test/deploy)          │   │
 │  │  • Architecture overview from CLAUDE.md                         │   │
 │  │  • Current skills list for reference                           │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
@@ -786,7 +786,7 @@ const session = await claude.startSession({
 
 1. **Update CLAUDE.md** - Tell Claude Code to ALWAYS use `$ANDEE_API_KEY` in example commands, never literal values
 
-2. **Update andee-ops skill** - Same instruction for deployment/testing commands
+2. **Update deploying-andee skill** - Same instruction for deployment/testing commands
 
 3. **Update implement-s skill** - Remind to use env vars when testing
 
@@ -814,9 +814,293 @@ curl -X POST http://localhost:8787/reset \
 
 **Implementation locations**:
 - `CLAUDE.md` - Update all curl examples to use `$ANDEE_API_KEY`
-- `.claude/skills/andee-ops/SKILL.md` - Same
+- `.claude/skills/deploying-andee/SKILL.md` - Same
 - `.claude/skills/implement-s/SKILL.md` - Same
 - Optional: Add `direnv` or shell hook to auto-load env vars
+
+---
+
+## 13. Self-Sufficient Planning Mode (Claude Does Its Own Testing)
+
+**Problem**: When Claude Code enters planning mode for Andee features, it sometimes creates plans that delegate testing to the user:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ❌ BAD PLAN (Delegates to User)                                        │
+│                                                                         │
+│  Phase 3: Testing                                                       │
+│  - [ ] Deploy to production                                             │
+│  - [ ] User tests via Telegram on their phone    ← BAD: User does work │
+│  - [ ] User reports any issues                   ← BAD: Waiting on user│
+│  - [ ] Fix issues based on user feedback         ← BAD: Slow iteration │
+│                                                                         │
+│  This creates a slow back-and-forth where Claude waits for user        │
+│  to manually test things instead of doing it autonomously.             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Proposed Behavior**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ✅ GOOD PLAN (Self-Sufficient)                                         │
+│                                                                         │
+│  Phase 3: Testing                                                       │
+│  - [ ] Deploy to production                                             │
+│  - [ ] Reset sandbox via curl                    ← Claude does it       │
+│  - [ ] Test feature via curl /ask-telegram       ← Claude does it       │
+│  - [ ] Check logs via curl /logs                 ← Claude does it       │
+│  - [ ] Iterate and fix any issues found          ← Claude does it       │
+│  - [ ] Verify fix via curl again                 ← Claude does it       │
+│  - [ ] ONLY ask user if genuinely stuck          ← User as last resort │
+│                                                                         │
+│  Claude should exhaust all automated testing options before involving  │
+│  the user. Most issues can be caught via curl + log analysis.          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**When User Input IS Appropriate**:
+- UI/UX feedback that requires visual inspection (Mini Apps)
+- Preference decisions ("do you want feature A or B?")
+- Real Telegram-specific behavior that curl can't test (push notifications, reactions rendering)
+- Approval before deploying something risky
+
+**When User Input is NOT Needed**:
+- Functional testing (does the endpoint return expected data?)
+- Error checking (are there errors in the logs?)
+- Type checking (does it compile?)
+- Regression testing (did we break something else?)
+
+**Second Part: Mandatory Documentation Update**
+
+Plans should ALWAYS end with a documentation phase that updates everything touched:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Phase 4: Documentation (MANDATORY - After E2E Testing Passes)         │
+│                                                                         │
+│  - [ ] Update CLAUDE.md if:                                             │
+│        • New endpoints added                                            │
+│        • Architecture changed                                           │
+│        • New gotchas discovered                                         │
+│        • New commands/workflows                                         │
+│                                                                         │
+│  - [ ] Update relevant .claude/skills/:                                 │
+│        • developing-andee - if implementation patterns changed          │
+│        • deploying-andee - if deployment/debugging changed              │
+│        • implement-s - if workflow itself improved                      │
+│        • Any skill that references changed code                         │
+│                                                                         │
+│  - [ ] Update FUTURE_IDEAS.md:                                          │
+│        • Mark implemented ideas as IMPLEMENTED                          │
+│        • Add any new ideas discovered during implementation             │
+│        • Note follow-up improvements                                    │
+│                                                                         │
+│  - [ ] Update Andee's runtime skills if applicable:                     │
+│        • claude-sandbox-worker/.claude/skills/*                         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**The Principle**: After implementing a feature, the codebase knowledge should be updated so the NEXT feature implementation benefits from what was learned. Skills should evolve with the codebase.
+
+**Implementation Approach**:
+
+Update these skills to include this guidance:
+1. **`.claude/skills/implement-s/SKILL.md`** - Main place to add this (the implementation workflow)
+2. **`.claude/skills/developing-andee/SKILL.md`** - Reinforce self-sufficient debugging
+3. **`CLAUDE.md`** - Add a "Planning Guidelines" section
+
+**Example additions to implement-s**:
+
+```markdown
+## Testing Philosophy
+
+YOU (Claude Code) should do the testing, not the user:
+- Use curl to test endpoints directly
+- Check logs via /logs endpoint after each test
+- Iterate on failures until tests pass
+- Only involve user for UI feedback or preference decisions
+
+## Documentation Phase (Never Skip)
+
+After e2e testing passes, update ALL relevant documentation:
+- CLAUDE.md (if architecture/endpoints/gotchas changed)
+- .claude/skills/* (any skills that touch changed areas)
+- FUTURE_IDEAS.md (mark implemented, add new ideas)
+```
+
+**Implementation locations**:
+- `.claude/skills/implement-s/SKILL.md` - Primary location
+- `.claude/skills/developing-andee/DEBUGGING.md` - Reinforce self-sufficient debugging
+- `CLAUDE.md` - Optional "Planning Guidelines" section
+
+---
+
+## 14. Mini App Data via Key-Value Store (Not URL Encoding)
+
+**Problem**: Currently, Mini Apps receive their data encoded directly in the URL:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  CURRENT: Data Encoded in URL                                           │
+│                                                                         │
+│  webapp:https://andee-7rd.pages.dev/weather/?data=eyJ0ZW1wIjotNiwiY29u  │
+│  ZGl0aW9uIjoic25vdyIsImhvdXJseSI6W3siaG91ciI6IjlhbSIsInRlbXAiOi01fSx7   │
+│  ImhvdXIiOiIxMGFtIiwidGVtcCI6LTR9LHsiaG91ciI6IjExYW0iLCJ0ZW1wIjotM30s   │
+│  eyJob3VyIjoiMTJwbSIsInRlbXAiOi0yfV0sImZvcmVjYXN0IjpbLi4uXX0=          │
+│                              ↑                                          │
+│              Base64-encoded JSON blob in URL                            │
+│                                                                         │
+│  Problems:                                                              │
+│  ├── 🔓 Data easily decoded (just base64 decode)                       │
+│  ├── 📏 URL length limits (~2000 chars in some browsers)               │
+│  ├── 📊 Can't send large datasets (detailed forecasts, recipes, etc.) │
+│  └── 🔗 Long ugly URLs in Telegram messages                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Proposed Solution**: Store data in a key-value store, pass only a UUID in the URL:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PROPOSED: UUID Key in URL, Data in KV Store                            │
+│                                                                         │
+│  Step 1: Claude generates Mini App data                                 │
+│          │                                                              │
+│          ▼                                                              │
+│  Step 2: Worker saves to KV store with UUID key                         │
+│          ┌──────────────────────────────────────────────────┐          │
+│          │  KV Store                                        │          │
+│          │  ┌────────────────────┬───────────────────────┐ │          │
+│          │  │ Key (UUID)         │ Value (JSON)          │ │          │
+│          │  ├────────────────────┼───────────────────────┤ │          │
+│          │  │ a1b2c3d4-e5f6-... │ { temp: -6,           │ │          │
+│          │  │                    │   condition: "snow",  │ │          │
+│          │  │                    │   hourly: [...],      │ │          │
+│          │  │                    │   forecast: [...],    │ │          │
+│          │  │                    │   clothing: {...}     │ │          │
+│          │  │                    │ }                     │ │          │
+│          │  └────────────────────┴───────────────────────┘ │          │
+│          └──────────────────────────────────────────────────┘          │
+│          │                                                              │
+│          ▼                                                              │
+│  Step 3: URL contains only the UUID                                     │
+│          webapp:https://andee-7rd.pages.dev/weather/?id=a1b2c3d4-e5f6   │
+│                                                          ↑              │
+│                                            Short, clean, opaque         │
+│          │                                                              │
+│          ▼                                                              │
+│  Step 4: Mini App fetches data on load                                  │
+│          fetch(`/api/miniapp-data/${uuid}`) → returns JSON             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits**:
+
+| Aspect | URL Encoding (Current) | KV Store (Proposed) |
+|--------|------------------------|---------------------|
+| **Security** | Data visible in URL (base64) | Only opaque UUID visible |
+| **Size limit** | ~2000 chars max | Unlimited (KV/R2 limits are huge) |
+| **URL appearance** | Long, ugly, suspicious | Short, clean |
+| **Data flexibility** | Limited to URL-safe encoding | Any JSON structure |
+| **Rich data** | Hard to include images/large datasets | Easy - just store more |
+
+**Storage Options** (to decide):
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Option A: Cloudflare KV                                                │
+│  ├── Pros: Built for this, fast reads, simple API                      │
+│  ├── Cons: Eventually consistent, costs per read/write                 │
+│  └── TTL: Can auto-expire old entries (e.g., 24 hours)                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Option B: R2 (flat files)                                              │
+│  ├── Pros: Already using R2, no new service                            │
+│  ├── Cons: Slightly slower for small reads                             │
+│  └── Path: miniapp-data/{uuid}.json                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Option C: Durable Objects SQL                                          │
+│  ├── Pros: Already have DO, transactional                              │
+│  ├── Cons: Overkill for simple KV lookups                              │
+│  └── Table: CREATE TABLE miniapp_data (id TEXT PRIMARY KEY, data JSON) │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Recommended**: **Cloudflare KV** with TTL expiration (24-48 hours). Mini App data is ephemeral - once viewed, it doesn't need to persist forever.
+
+**Flow Diagram**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  Claude Agent                                                           │
+│      │                                                                  │
+│      │ 1. Generates weather data                                        │
+│      ▼                                                                  │
+│  POST /miniapp-data                                                     │
+│  { type: "weather", data: {...} }                                       │
+│      │                                                                  │
+│      │ 2. Worker generates UUID, stores in KV                           │
+│      ▼                                                                  │
+│  Returns: { id: "a1b2c3d4-..." }                                        │
+│      │                                                                  │
+│      │ 3. Claude outputs link with UUID                                 │
+│      ▼                                                                  │
+│  [View Weather](webapp:https://andee.../weather/?id=a1b2c3d4)          │
+│      │                                                                  │
+│      │ 4. User taps button, Mini App loads                              │
+│      ▼                                                                  │
+│  Mini App: fetch("/api/miniapp-data/a1b2c3d4")                          │
+│      │                                                                  │
+│      │ 5. Worker retrieves from KV, returns data                        │
+│      ▼                                                                  │
+│  Mini App hydrates with full data                                       │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**API Design**:
+
+```typescript
+// Store data (called by Claude agent)
+POST /miniapp-data
+Body: { type: "weather" | "recipe" | ..., data: any }
+Response: { id: "uuid-here", expiresAt: "2024-01-16T12:00:00Z" }
+
+// Retrieve data (called by Mini App)
+GET /miniapp-data/:id
+Response: { type: "weather", data: {...} }
+// Returns 404 if expired or not found
+```
+
+**Mini App Changes**:
+
+```javascript
+// Current (in index.html)
+const params = new URLSearchParams(window.location.search);
+const data = JSON.parse(atob(params.get('data')));
+
+// Proposed
+const params = new URLSearchParams(window.location.search);
+const id = params.get('id');
+const response = await fetch(`https://claude-sandbox-worker.../miniapp-data/${id}`);
+const { data } = await response.json();
+```
+
+**Security Considerations**:
+- UUIDs are unguessable (128-bit random)
+- Data expires after 24-48 hours (not permanent)
+- Could add user validation (check Telegram user ID matches) for extra security
+- No sensitive data should be stored anyway (weather, recipes are not secrets)
+
+**Implementation locations**:
+- `claude-sandbox-worker/src/index.ts` - Add `/miniapp-data` endpoints
+- `claude-sandbox-worker/wrangler.toml` - Add KV namespace binding
+- `apps/src/weather/index.html` - Update to fetch data instead of URL decode
+- `apps/src/*/index.html` - Same for all Mini Apps
+- `.claude/skills/developing-andee/IMPLEMENTATION.md` - Document new pattern
 
 ---
 

@@ -7,17 +7,15 @@ import {
   CORS_HEADERS,
   HandlerContext,
   SessionData,
+  SessionUpdateRequest,
   createDefaultSession,
   getSessionKey,
 } from "../types";
 
 export async function handleSessionUpdate(ctx: HandlerContext): Promise<Response> {
   try {
-    const body = (await ctx.request.json()) as {
-      chatId: string;
-      claudeSessionId: string;
-    };
-    const { chatId, claudeSessionId } = body;
+    const body = (await ctx.request.json()) as SessionUpdateRequest;
+    const { chatId, claudeSessionId, senderId, isGroup } = body;
 
     if (!chatId || !claudeSessionId || !ctx.env.SESSIONS) {
       return Response.json(
@@ -26,7 +24,7 @@ export async function handleSessionUpdate(ctx: HandlerContext): Promise<Response
       );
     }
 
-    const sessionKey = getSessionKey(chatId);
+    const sessionKey = getSessionKey(chatId, senderId, isGroup);
     let session: SessionData;
 
     try {
@@ -45,7 +43,7 @@ export async function handleSessionUpdate(ctx: HandlerContext): Promise<Response
     session.updatedAt = new Date().toISOString();
     await ctx.env.SESSIONS.put(sessionKey, JSON.stringify(session));
 
-    console.log(`[Worker] Session updated for chat ${chatId}: ${claudeSessionId}`);
+    console.log(`[Worker] Session updated: ${sessionKey} (claudeSessionId: ${claudeSessionId})`);
     return Response.json({ success: true }, { headers: CORS_HEADERS });
   } catch (error) {
     console.error("[Worker] Session update error:", error);

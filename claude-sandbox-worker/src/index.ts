@@ -8,12 +8,13 @@
  *   GET  /             Health check (no auth)
  *   GET  /diag         Diagnostic tests
  *   GET  /logs         Read agent logs
- *   GET  /poll         Poll streaming progress
- *   POST /ask          Synchronous query
- *   POST /ask-stream   Start streaming query
- *   POST /ask-telegram Fire-and-forget Telegram message
- *   POST /reset        Destroy sandbox and session
+ *   POST /ask          Fire-and-forget (persistent server)
+ *   POST /reset        Destroy sandbox and session (snapshots first)
  *   POST /session-update Update session in R2
+ *   POST /snapshot     Create filesystem snapshot
+ *   GET  /snapshot     Get latest snapshot (tar.gz)
+ *   GET  /snapshots    List all snapshots
+ *   DELETE /snapshot   Delete snapshot(s)
  */
 
 // Re-export Sandbox for Durable Object binding
@@ -23,13 +24,14 @@ import { CORS_HEADERS, Env, HandlerContext } from "./types";
 import {
   handleHealth,
   handleAsk,
-  handleAskStream,
-  handlePoll,
-  handleAskTelegram,
   handleDiag,
   handleLogs,
   handleReset,
   handleSessionUpdate,
+  handleSnapshotCreate,
+  handleSnapshotGet,
+  handleSnapshotsList,
+  handleSnapshotDelete,
 } from "./handlers";
 
 /**
@@ -76,27 +78,9 @@ export default {
         }
         break;
 
-      case "/poll":
-        if (request.method === "GET") {
-          return handlePoll(ctx);
-        }
-        break;
-
       case "/ask":
         if (request.method === "POST") {
           return handleAsk(ctx);
-        }
-        break;
-
-      case "/ask-stream":
-        if (request.method === "POST") {
-          return handleAskStream(ctx);
-        }
-        break;
-
-      case "/ask-telegram":
-        if (request.method === "POST") {
-          return handleAskTelegram(ctx);
         }
         break;
 
@@ -109,6 +93,24 @@ export default {
       case "/session-update":
         if (request.method === "POST") {
           return handleSessionUpdate(ctx);
+        }
+        break;
+
+      case "/snapshot":
+        if (request.method === "POST") {
+          return handleSnapshotCreate(ctx);
+        }
+        if (request.method === "GET") {
+          return handleSnapshotGet(ctx);
+        }
+        if (request.method === "DELETE") {
+          return handleSnapshotDelete(ctx);
+        }
+        break;
+
+      case "/snapshots":
+        if (request.method === "GET") {
+          return handleSnapshotsList(ctx);
         }
         break;
     }

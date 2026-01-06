@@ -11,6 +11,7 @@ Troubleshooting and debugging Andee issues.
 - [Diagnostics](#diagnostics)
 - [Resetting Sandboxes](#resetting-sandboxes)
 - [R2 Session Management](#r2-session-management)
+- [Snapshot Management](#snapshot-management)
 - [Testing Endpoints Directly](#testing-endpoints-directly)
 - [Verify Persistent Server](#verify-persistent-server)
 - [Common Issues & Solutions](#common-issues--solutions)
@@ -89,6 +90,7 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 | `COMPLETE cost=$X chars=Y` | Response complete with cost |
 | `TELEGRAM_SENT` | Response sent to user |
 | `R2_SESSION_UPDATED` | Session persisted to R2 |
+| `AUTO_SNAPSHOT creating/created/error` | Auto-snapshot (55min idle) |
 
 ---
 
@@ -97,6 +99,7 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 | Location | Purpose |
 |----------|---------|
 | R2: `andee-sessions/sessions/{chatId}.json` | Session IDs, message counts |
+| R2: `andee-snapshots/snapshots/{chatId}/{timestamp}.tar.gz` | Filesystem backups |
 | Container: `~/.claude/` | Claude session transcripts |
 | Container: `/workspace/telegram_agent.log` | Agent logs |
 | Container: `/workspace/files/` | Working directory |
@@ -113,13 +116,16 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/diag" | jq .
 
 ## Resetting Sandboxes
 
-Destroys the container and clears the R2 session:
+Creates a snapshot of the current state, then destroys the container and clears the R2 session:
 
 ```bash
 curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/reset" \
   -H "Content-Type: application/json" \
   -d '{"chatId":"CHAT_ID"}'
+# Returns: { success: true, snapshotKey: "snapshots/CHAT_ID/..." }
 ```
+
+The next request to this chatId will automatically restore from the latest snapshot.
 
 ---
 
@@ -138,21 +144,70 @@ npx wrangler r2 object delete andee-sessions/sessions/CHAT_ID.json --remote
 
 ---
 
+## Snapshot Management
+
+Snapshots backup `/workspace` and `/home/claude` directories to R2.
+
+### API Endpoints
+
+```bash
+# Create manual snapshot
+curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot" \
+  -H "Content-Type: application/json" \
+  -d '{"chatId":"CHAT_ID"}'
+
+# List snapshots for a chat
+curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshots?chatId=CHAT_ID"
+
+# Get latest snapshot (returns tar.gz)
+curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot?chatId=CHAT_ID" -o snapshot.tar.gz
+
+# Delete all snapshots for a chat
+curl -s -X DELETE "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot?chatId=CHAT_ID&key=all"
+```
+
+### Wrangler R2 Commands
+
+```bash
+# List all snapshots
+npx wrangler r2 object list andee-snapshots --prefix=snapshots/ --remote
+
+# List snapshots for specific chat
+npx wrangler r2 object list andee-snapshots --prefix=snapshots/CHAT_ID/ --remote
+
+# Download a snapshot
+npx wrangler r2 object get andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00.000Z.tar.gz --file=snapshot.tar.gz --remote
+
+# Delete a snapshot
+npx wrangler r2 object delete andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00.000Z.tar.gz --remote
+```
+
+### Snapshot Lifecycle
+
+| Trigger | When |
+|---------|------|
+| Auto (idle timer) | After 55 minutes of inactivity (before 1h sleep) |
+| Pre-reset | Before `/reset` destroys the sandbox |
+| Manual | User calls `/snapshot` command in Telegram |
+
+### Restore Behavior
+
+- Snapshots are automatically restored when a fresh container starts
+- Restore happens in the `/ask` endpoint
+- The latest snapshot (by timestamp) is always used
+
+---
+
 ## Testing Endpoints Directly
 
 ```bash
 # Health check
 curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/"
 
-# Test /ask endpoint (synchronous, waits for response)
+# Test /ask endpoint (persistent server, fire-and-forget)
 curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/ask" \
   -H "Content-Type: application/json" \
-  -d '{"chatId":"test","message":"say hi","claudeSessionId":null}'
-
-# Test /ask-telegram endpoint (persistent server, fire-and-forget)
-curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/ask-telegram" \
-  -H "Content-Type: application/json" \
-  -d '{"chatId":"test","message":"hello","botToken":"fake-token","claudeSessionId":null}'
+  -d '{"chatId":"test","message":"hello","botToken":"fake-token","claudeSessionId":null,"userMessageId":1}'
 
 # Check if persistent server is running (look for "Persistent server already running")
 # Send second message to same chatId and check wrangler tail logs
@@ -167,14 +222,14 @@ curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/ask-tel
 curl -s -X POST ".../reset" -d '{"chatId":"perf-test"}'
 
 # 2. Send first message (starts server)
-curl -s -X POST ".../ask-telegram" -d '{"chatId":"perf-test","message":"hi","botToken":"fake",...}'
+curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"hi","botToken":"fake","userMessageId":1}'
 
 # 3. Wait 10 seconds, check logs
 curl -s ".../logs?chatId=perf-test" | jq -r '.log'
 # Should see: GENERATOR waiting for message... (server is persistent)
 
 # 4. Send second message (should reuse server - ~3.5s instead of ~7s)
-curl -s -X POST ".../ask-telegram" -d '{"chatId":"perf-test","message":"test","botToken":"fake",...}'
+curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"test","botToken":"fake","userMessageId":2}'
 
 # 5. Check wrangler tail - should see "Persistent server already running"
 ```

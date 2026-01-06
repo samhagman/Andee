@@ -10,11 +10,18 @@ export type {
   AskRequest,
   AskTelegramRequest,
   ResetRequest,
+  SessionUpdateRequest,
+  SnapshotRequest,
   AgentOutput,
   StreamingProgress,
 } from "../../shared";
 
-export { createDefaultSession, getSessionKey } from "../../shared";
+export {
+  createDefaultSession,
+  getSessionKey,
+  getSnapshotKey,
+  getSnapshotPrefix,
+} from "../../shared";
 
 /**
  * Environment bindings for the Cloudflare Worker.
@@ -23,6 +30,7 @@ export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   ANTHROPIC_API_KEY: string;
   SESSIONS: R2Bucket;
+  SNAPSHOTS: R2Bucket;
   ANDEE_API_KEY?: string;
 }
 

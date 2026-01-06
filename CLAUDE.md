@@ -15,23 +15,24 @@ curl http://localhost:8787/                                    # Health check (n
 curl -X POST http://localhost:8787/ask \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
-  -d '{"chatId":"test","message":"Say hello","claudeSessionId":null}'
-
-# Streaming test
-curl -X POST http://localhost:8787/ask-stream \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $ANDEE_API_KEY" \
-  -d '{"chatId":"test","message":"Say hello","claudeSessionId":null}'
-curl -H "X-API-Key: $ANDEE_API_KEY" "http://localhost:8787/poll?chatId=test"
+  -d '{"chatId":"test","message":"Say hello","claudeSessionId":null,"botToken":"YOUR_BOT_TOKEN","userMessageId":1}'
 
 # Debug container issues
 curl -H "X-API-Key: $ANDEE_API_KEY" http://localhost:8787/diag | jq .
 
-# Reset a chat's sandbox
+# Reset a chat's sandbox (creates snapshot first)
 curl -X POST http://localhost:8787/reset \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
-  -d '{"chatId":"test"}'
+  -d '{"chatId":"test","senderId":"123","isGroup":false}'
+
+# Snapshot operations
+curl -X POST http://localhost:8787/snapshot \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"test","senderId":"123","isGroup":false}'     # Create snapshot
+curl -H "X-API-Key: $ANDEE_API_KEY" \
+  "http://localhost:8787/snapshots?chatId=test&senderId=123&isGroup=false"  # List
 ```
 
 ## Architecture
@@ -65,7 +66,7 @@ Telegram bot powered by Claude Code Agent SDK with persistent server in Cloudfla
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Message flow**: Bot sends `POST /ask-telegram` → Worker checks if persistent server running → If not, starts via `startProcess()` → POST message to internal HTTP server → Claude processes via streaming input → Responds directly to Telegram.
+**Message flow**: Bot sends `POST /ask` → Worker checks if persistent server running → If not, starts via `startProcess()` → POST message to internal HTTP server → Claude processes via streaming input → Responds directly to Telegram.
 
 ## Critical Configuration
 
@@ -129,6 +130,42 @@ npm run deploy-code      # Code only (no secrets)
 openssl rand -hex 16 | sed 's/^/adk_/'
 ```
 
+## R2 Storage Structure
+
+Sessions and snapshots are organized by Telegram user ID for data isolation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  R2 KEY STRUCTURE (per-user isolation)                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  PRIVATE CHATS (senderId = user's Telegram ID):                         │
+│  ├── sessions/{senderId}/{chatId}.json                                  │
+│  └── snapshots/{senderId}/{chatId}/{timestamp}.tar.gz                   │
+│                                                                         │
+│  GROUP CHATS (shared per chat, not per user):                           │
+│  ├── sessions/groups/{chatId}.json                                      │
+│  └── snapshots/groups/{chatId}/{timestamp}.tar.gz                       │
+│                                                                         │
+│  Example paths:                                                         │
+│  ├── sessions/123456789/123456789.json     (private: user=chat)         │
+│  ├── sessions/123456789/-100987654321.json (private bot to user)        │
+│  ├── sessions/groups/-100555666777.json    (supergroup)                 │
+│  └── snapshots/123456789/-100987654321/2025-01-06T12-00-00-000Z.tar.gz  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key generation** (`shared/types/session.ts`):
+- `getSessionKey(chatId, senderId, isGroup)` → R2 session path
+- `getSnapshotKey(chatId, senderId, isGroup, timestamp?)` → R2 snapshot path
+- `getSnapshotPrefix(chatId, senderId, isGroup)` → For listing snapshots
+
+**Why this structure:**
+- Per-user data isolation for future quotas/billing
+- Group chats shared because participants change dynamically
+- Legacy fallback for keys without senderId/isGroup (orphaned data)
+
 ## Performance
 
 | Message Type | Time | Notes |
@@ -156,8 +193,8 @@ openssl rand -hex 16 | sed 's/^/adk_/'
 
 ```
 /Andee/.claude/skills/               ← FOR YOU (developer) using Claude Code
-├── andee-ops/                          to build Andee on your machine
-└── andee-dev/
+├── deploying-andee/                    to build Andee on your machine
+└── developing-andee/
 
 /Andee/claude-sandbox-worker/.claude/skills/  ← FOR ANDEE (the bot) when
 └── weather/SKILL.md                             responding to Telegram users
@@ -166,8 +203,8 @@ openssl rand -hex 16 | sed 's/^/adk_/'
 Andee IS a Claude Code-based bot. It has its own skills that get copied into its Docker container.
 
 **Developer Skills:**
-- **andee-ops** - Deployment guide. Use for: deploying to Cloudflare, setting secrets, configuring webhooks, container instance types
-- **andee-dev** - Development + debugging guide. Use for: creating skills, building Mini Apps, debugging issues, analyzing logs
+- **deploying-andee** - Deployment guide. Use for: deploying to Cloudflare, setting secrets, configuring webhooks, container instance types
+- **developing-andee** - Development + debugging guide. Use for: creating skills, building Mini Apps, debugging issues, analyzing logs
 
 **To add a new skill for Andee (the bot):**
 1. Create directory: `claude-sandbox-worker/.claude/skills/{skill-name}/`
@@ -176,80 +213,23 @@ Andee IS a Claude Code-based bot. It has its own skills that get copied into its
 
 ## Mini Apps (Telegram Web Apps)
 
-Skills provide rich UI via Telegram Mini Apps using **Direct Link Mini Apps**. Claude returns links in this format:
-```markdown
-[Button Text](https://t.me/HeyAndee_bot/app?startapp={component}_{base64url_data})
-```
+Skills provide rich UI via Telegram Mini Apps using Direct Link Mini Apps. See [.claude/skills/developing-andee/guides/mini-apps.md](.claude/skills/developing-andee/guides/mini-apps.md) for the complete development guide.
 
-The link opens a **shell Mini App** that dynamically loads the requested component. This works in both private and group chats.
-
-**startapp format:** `{component}_{base64url_data}`
-- `component`: Folder name in `apps/src/` (e.g., `weather`)
-- `base64url_data`: Base64url-encoded JSON (no `+`, `/`, or `=`)
-
-**Architecture:**
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  User taps: https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...   │
-│        ↓                                                                 │
-│  Shell (apps/src/app/) parses startapp, loads component in iframe       │
-│        ↓                                                                 │
-│  Component (apps/src/weather/) reads data from URL hash (#data=...)     │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Directory structure:**
-```
-apps/
-├── package.json              # Vite + TypeScript
-├── vite.config.ts            # Multi-page app config
-├── tsconfig.json
-└── src/
-    ├── lib/                  # SHARED LIBRARY
-    │   ├── telegram.ts       # initTelegram(), applyTheme(), getStartParam()
-    │   ├── base64url.ts      # encode(), decode()
-    │   ├── data.ts           # getData<T>() from URL hash
-    │   ├── base.css          # Shared styles, CSS variables
-    │   └── types/            # TypeScript interfaces (WeatherData, etc.)
-    ├── app/                  # Shell router
-    │   ├── index.html
-    │   └── main.ts
-    ├── weather/              # Weather component
-    │   ├── index.html
-    │   ├── main.ts
-    │   └── weather.css
-    └── {component}/          # Add new components here
-```
-
-**Commands:**
+**Quick reference:**
 ```bash
 cd apps && npm run dev        # Vite dev server on port 8788
 cd apps && npm run build      # Build to dist/
-cd apps && npm run preview    # Preview built files locally
 cd apps && npm run typecheck  # TypeScript validation
 cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 ```
 
-**Adding a new component:**
-1. Create directory: `mkdir -p apps/src/{component-name}`
-2. Create `index.html` (minimal HTML entry)
-3. Create `main.ts` importing shared utilities:
-   ```typescript
-   import { initTelegram, getData } from '../lib';
-   import type { MyData } from '../lib/types/mydata';
-
-   initTelegram();
-   const { data, error } = getData<MyData>();
-   // ... render component
-   ```
-4. Add entry to `vite.config.ts` rollupOptions.input
-5. Add TypeScript interface in `apps/src/lib/types/`
-6. Deploy: `cd apps && npm run deploy`
-7. Update skill to generate links with new component name
-
 ## Key Files
 
-- `claude-sandbox-worker/src/index.ts` - Worker with `PERSISTENT_SERVER_SCRIPT` (streaming input mode), endpoints, Sandbox SDK orchestration
+- `claude-sandbox-worker/src/index.ts` - Worker endpoints, Sandbox SDK orchestration
+- `claude-sandbox-worker/src/scripts/` - Container scripts (imported as text via Wrangler `[[rules]]`)
+  - `persistent-server.script.js` - HTTP server with streaming Claude input (main execution path)
+  - `agent-telegram.script.js` - Fallback one-shot agent
+  - `scripts.d.ts` - TypeScript declarations for `.script.js` imports
 - `claude-sandbox-worker/Dockerfile` - Container image with Claude CLI, Agent SDK, port 8080 exposed
 - `claude-sandbox-worker/.claude/skills/` - Andee's runtime skills (for responding to users)
 - `claude-telegram-bot/src/index.ts` - Grammy bot with webhook handler
@@ -266,12 +246,15 @@ cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/` | GET | Health check |
-| `/ask` | POST | Synchronous query (waits for response) |
-| `/ask-telegram` | POST | Fire-and-forget (agent sends to Telegram directly) |
+| `/ask` | POST | Fire-and-forget (persistent server, responds to Telegram) |
 | `/logs?chatId=X` | GET | Read agent logs from container |
-| `/reset` | POST | Destroy sandbox + delete R2 session |
+| `/reset` | POST | Snapshot + destroy sandbox + delete R2 session |
 | `/session-update` | POST | Update session in R2 (called by agent) |
 | `/diag` | GET | Run diagnostics on container |
+| `/snapshot` | POST | Create filesystem snapshot (backup /workspace + /home/claude) |
+| `/snapshot?chatId=X` | GET | Get latest snapshot (returns tar.gz) |
+| `/snapshots?chatId=X` | GET | List all snapshots for a chat |
+| `/snapshot?chatId=X&key=Y` | DELETE | Delete specific snapshot (key=all to delete all) |
 
 ### claude-telegram-bot
 

@@ -1,6 +1,6 @@
 ---
-name: andee-dev
-description: Develops and debugs Andee bot features. Covers creating skills, building Mini Apps, Direct Link Mini Apps, container tools, log analysis, and troubleshooting. Use when adding features, creating skills, implementing Mini Apps, debugging issues, or analyzing logs. For deployment, use andee-ops instead.
+name: developing-andee
+description: Develops and debugs Andee bot features. Covers creating skills, building Mini Apps, Direct Link Mini Apps, container tools, log analysis, and troubleshooting. Use when adding features, creating skills, implementing Mini Apps, debugging issues, or analyzing logs. For deployment, use deploying-andee instead.
 ---
 
 # Andee Development
@@ -32,9 +32,26 @@ See [DEBUGGING.md](DEBUGGING.md) for:
 - Common issues & solutions
 - Performance timing analysis
 
+### Development Workflow
+
+See [DEVELOPMENT_WORKFLOW.md](DEVELOPMENT_WORKFLOW.md) for the `/implement-s` command workflow:
+- Milestone-based implementation
+- TodoWrite tracking
+- Self-testing (you test, not user)
+- Documentation updates
+
+### Mini Apps Development
+
+See [guides/mini-apps.md](guides/mini-apps.md) for the complete Mini Apps development guide:
+- Vite + TypeScript architecture
+- Direct Link format and shell router
+- Shared library (telegram.ts, base64url, data extraction)
+- Step-by-step component creation
+- Testing and deployment commands
+
 ### Deployment
 
-Use the `andee-ops` skill for:
+Use the `deploying-andee` skill for:
 - Deploying to Cloudflare (wrangler deploy)
 - Setting secrets (ANTHROPIC_API_KEY, BOT_TOKEN)
 - Configuring webhooks
