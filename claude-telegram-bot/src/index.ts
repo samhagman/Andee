@@ -1,38 +1,33 @@
 import { Bot, webhookCallback, InlineKeyboard } from "grammy";
+import {
+  SessionData,
+  createDefaultSession,
+  getSessionKey,
+} from "../../shared/types/session";
 
 // Type definitions
 interface Env {
   BOT_TOKEN: string;
   SESSIONS: R2Bucket;
   SANDBOX_WORKER: Fetcher;
-}
-
-interface SessionData {
-  claudeSessionId: string | null;
-  messageCount: number;
-  createdAt: string;
-  updatedAt: string;
+  ALLOWED_USER_IDS?: string;  // Comma-separated Telegram user IDs
+  ANDEE_API_KEY?: string;     // API key for worker authentication
 }
 
 // Session helpers using R2
 async function getSession(env: Env, chatId: string): Promise<SessionData> {
-  const key = `sessions/${chatId}.json`;
+  const key = getSessionKey(chatId);
   const object = await env.SESSIONS.get(key);
 
   if (object) {
     return await object.json() as SessionData;
   }
 
-  return {
-    claudeSessionId: null,
-    messageCount: 0,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
+  return createDefaultSession();
 }
 
 async function deleteSession(env: Env, chatId: string): Promise<void> {
-  const key = `sessions/${chatId}.json`;
+  const key = getSessionKey(chatId);
   await env.SESSIONS.delete(key);
 }
 
@@ -40,7 +35,10 @@ async function resetSandbox(env: Env, chatId: string): Promise<void> {
   await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/reset", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || ""
+      },
       body: JSON.stringify({ chatId })
     })
   );
@@ -58,7 +56,10 @@ async function fireAndForgetToSandbox(
   await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask-telegram", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || ""
+      },
       body: JSON.stringify({
         chatId,
         message,
@@ -86,6 +87,14 @@ export default {
     // Create bot for webhook handling
     const bot = new Bot(env.BOT_TOKEN);
 
+    // Auth helper: check if user is allowed
+    const isUserAllowed = (userId: number | undefined): boolean => {
+      const allowedUserIds = env.ALLOWED_USER_IDS?.split(',').map(id => id.trim()).filter(Boolean) || [];
+      // If no allowlist configured, allow all (for initial setup/testing)
+      if (allowedUserIds.length === 0) return true;
+      return userId !== undefined && allowedUserIds.includes(userId.toString());
+    };
+
     // /start command
     bot.command("start", async (ctx) => {
       await ctx.reply(
@@ -103,6 +112,10 @@ export default {
 
     // /new command
     bot.command("new", async (ctx) => {
+      if (!isUserAllowed(ctx.from?.id)) {
+        await ctx.reply("I'm currently in private testing mode and not available for public use.");
+        return;
+      }
       const chatId = ctx.chat.id.toString();
       await resetSandbox(env, chatId);
       await deleteSession(env, chatId);
@@ -111,6 +124,10 @@ export default {
 
     // /status command
     bot.command("status", async (ctx) => {
+      if (!isUserAllowed(ctx.from?.id)) {
+        await ctx.reply("I'm currently in private testing mode and not available for public use.");
+        return;
+      }
       const chatId = ctx.chat.id.toString();
       const session = await getSession(env, chatId);
       await ctx.reply(
@@ -126,8 +143,19 @@ export default {
     // Handle text messages - fire and forget to sandbox
     bot.on("message:text", async (botCtx) => {
       const chatId = botCtx.chat.id;
+      const senderId = botCtx.from?.id;
       const userMessage = botCtx.message.text;
       const userMessageId = botCtx.message.message_id;
+
+      // Log user info for ID discovery
+      console.log(`[AUTH] User ${botCtx.from?.username || 'unknown'} (ID: ${senderId}) in chat ${chatId} (type: ${botCtx.chat.type})`);
+
+      // Auth check: only allowed users can interact
+      if (!isUserAllowed(senderId)) {
+        console.log(`[AUTH] Rejected user ${botCtx.from?.username || 'unknown'} (ID: ${senderId})`);
+        await botCtx.reply("I'm currently in private testing mode and not available for public use.");
+        return;
+      }
 
       console.log(`[${chatId}] Received: ${userMessage.substring(0, 50)}...`);
 

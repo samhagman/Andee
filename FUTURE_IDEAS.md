@@ -6,6 +6,8 @@ A collection of enhancement ideas for the Andee Telegram bot.
 
 ## 1. Smarter Weather Clothing Recommendations
 
+**STATUS: IMPLEMENTED** - See `claude-sandbox-worker/.claude/skills/weather/SKILL.md`
+
 **Problem**: The current weather report bases clothing recommendations on general temperature ranges, but doesn't account for:
 - Scarf recommendations in cold weather
 - The temperatures you'll actually experience during your day
@@ -114,6 +116,8 @@ When getting ready in the morning, you care about the coldest temperature during
 
 ## 3. Weather Response Polish (Cleanup)
 
+**STATUS: IMPLEMENTED** - See `claude-sandbox-worker/.claude/skills/weather/SKILL.md`
+
 **Current issues visible in screenshot**:
 
 ```
@@ -149,6 +153,8 @@ When getting ready in the morning, you care about the coldest temperature during
 ---
 
 ## 4. Use Message Reactions Instead of "..." Typing Indicator
+
+**STATUS: IMPLEMENTED** - See `claude-telegram-bot/src/index.ts`
 
 **Problem**: When you send a message to Andee, the bot responds with "..." to show it's processing. This:
 - Clutters the chat with a placeholder message
@@ -500,6 +506,317 @@ and saved a Thai Basil Chicken recipe.
 - New Worker: `claude-backup-worker/` with cron trigger
 - `wrangler.toml`: `[triggers] crons = ["*/30 * * * *"]`
 - Backup bucket: Create `andee-backup` R2 bucket (separate from prod)
+
+---
+
+## 9. Group Chat Support
+
+**Goal**: Allow Andee to participate in Telegram group chats, not just 1:1 DMs.
+
+**Current State**: Andee only works in direct messages.
+
+**Proposed Behavior**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  GROUP CHAT: "Roommates"                                               │
+│                                                                         │
+│  Alice: hey what should we cook tonight?                               │
+│                                                                         │
+│  Bob: no idea, @Andee any suggestions?                                 │
+│              ↑                                                          │
+│        Mention triggers response                                        │
+│                                                                         │
+│  Andee: Based on your saved recipes, you have 3 in your "want to       │
+│         make" list! The Thai Basil Chicken is quick (~30 min).         │
+│                                                                         │
+│  Alice: @Andee what's the weather like tomorrow?                       │
+│                                                                         │
+│  Andee: Tomorrow in Boston: 2°C to 8°C, mostly cloudy...               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Trigger Options**:
+1. **@mention** - Only respond when explicitly mentioned (`@Andee`)
+2. **Reply** - Respond when someone replies to Andee's message
+3. **Keyword** - Respond to messages starting with "Andee," or "Hey Andee"
+4. **All messages** (opt-in) - Respond to everything (noisy, probably not default)
+
+**Considerations**:
+- **Privacy**: Group members share context? Or per-user memory?
+- **Rate limiting**: Don't spam the group
+- **Permissions**: Bot needs to be added to group with appropriate permissions
+- **Context**: Should Andee read previous group messages for context?
+
+**Implementation locations**:
+- `claude-telegram-bot/src/index.ts` - Handle group message events
+- Grammy middleware to detect mentions/replies
+- Possibly separate container per group (or shared?)
+
+---
+
+## 10. `/implement-s` Slash Command for End-to-End Feature Development
+
+**STATUS: IMPLEMENTED** - See `.claude/skills/implement-s/SKILL.md`
+
+**Goal**: Create a Claude Code skill that handles implementing new Andee features from start to finish, with all the right context, testing reminders, and links to relevant skills baked in.
+
+**Usage**:
+
+```
+/implement Add a reminder system where users can ask Andee to remind them about things at specific times
+```
+
+**What the Skill Provides**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  /implement <feature description>                                      │
+│                                                                         │
+│  Automatically injects:                                                │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  CONTEXT                                                        │   │
+│  │  • Link to andee-dev skill (how to add skills/mini apps)       │   │
+│  │  • Link to andee-ops skill (how to test/deploy)                │   │
+│  │  • Architecture overview from CLAUDE.md                         │   │
+│  │  • Current skills list for reference                           │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  IMPLEMENTATION CHECKLIST                                       │   │
+│  │  □ Plan the feature (ask clarifying questions)                 │   │
+│  │  □ Identify what needs to change (skill? worker? bot? app?)    │   │
+│  │  □ Implement the changes                                        │   │
+│  │  □ Test locally with curl commands                             │   │
+│  │  □ Test via Telegram (real device)                             │   │
+│  │  □ Update CLAUDE.md if architecture changed                    │   │
+│  │  □ Add to FUTURE_IDEAS.md if follow-up work identified         │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  TESTING REMINDERS                                              │   │
+│  │  • curl http://localhost:8787/ (health check)                  │   │
+│  │  • curl -X POST http://localhost:8787/ask-telegram ...         │   │
+│  │  • Check container logs for errors                             │   │
+│  │  • Test cold start AND warm path                               │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Example Flow**:
+
+```
+You: /implement Add a grocery list feature that integrates with recipes
+
+Claude Code:
+  1. Reads the skill, gets all context injected
+  2. Asks clarifying questions (storage? sharing? categories?)
+  3. Plans implementation across skill + worker + possibly mini app
+  4. Implements incrementally, testing each piece
+  5. Runs through checklist before marking complete
+  6. Suggests follow-up improvements for FUTURE_IDEAS.md
+```
+
+**Benefits**:
+- **Consistency** - Every feature follows same process
+- **No forgotten steps** - Testing, docs, follow-ups all prompted
+- **Context loaded** - Don't need to manually point to skills/docs
+- **Faster iteration** - One command kicks off full workflow
+
+**Implementation location**: `.claude/skills/implement/SKILL.md`
+
+---
+
+## 11. Custom System Prompt for Andee (Override Agent SDK Default)
+
+**Problem**: Andee currently uses the default Claude Code Agent SDK system prompt, which causes identity confusion:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  CURRENT BEHAVIOR (Confused Identity)                                  │
+│                                                                         │
+│  User: "Hey, what can you do?"                                         │
+│                                                                         │
+│  Andee: "I'm Claude Code, an AI assistant made by Anthropic.           │
+│          I can help you with software engineering tasks..."            │
+│                    ↑                                                    │
+│          Wrong! Should identify as Andee, a Telegram bot               │
+│                                                                         │
+│  User: "How do I use you?"                                             │
+│                                                                         │
+│  Andee: "You can use slash commands like /help, or run me              │
+│          from your terminal..."                                        │
+│                    ↑                                                    │
+│          Wrong! This is Telegram, not a CLI                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Proposed Solution**: Override the system prompt when initializing the Agent SDK to give Andee its own identity and context.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DESIRED BEHAVIOR (Clear Identity)                                     │
+│                                                                         │
+│  User: "Hey, what can you do?"                                         │
+│                                                                         │
+│  Andee: "I'm Andee, your personal Telegram assistant! I can:           │
+│          • Give you weather reports with clothing recommendations      │
+│          • Save and manage your recipes                                │
+│          • Remember things about you across conversations              │
+│          • Search the web and fetch information                        │
+│          • Create files and run code in my sandbox                     │
+│          Just message me naturally!"                                   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Custom System Prompt Should Include**:
+
+1. **Identity**: "You are Andee, a personal assistant Telegram bot"
+2. **Platform context**: "Users interact with you via Telegram messages"
+3. **Capabilities**: List of skills (weather, recipes, memory, web search, etc.)
+4. **Personality**: Friendly, concise, helpful (not overly formal)
+5. **Constraints**:
+   - Don't mention being Claude Code or a CLI tool
+   - Don't suggest terminal commands to the user
+   - Keep responses Telegram-friendly (not too long)
+6. **Mini Apps**: Explain that you can provide rich UI via buttons
+
+**Agent SDK Configuration**:
+
+```typescript
+// In PERSISTENT_SERVER_SCRIPT or agent initialization
+const session = await claude.startSession({
+  systemPrompt: `You are Andee, a personal assistant Telegram bot...`
+  // or however the Agent SDK accepts custom prompts
+});
+```
+
+**Real Examples of the Problem** (from testing):
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  User: "Testing to find my ID"                                         │
+│                                                                         │
+│  Andee (WRONG - thinks it's Claude Code):                              │
+│  "I can help you find your ID in a few different ways:                 │
+│   1. If you're looking for a system user ID: I can run commands        │
+│      like whoami or id to show your username and system IDs            │
+│   2. If you're looking for an ID in a specific application...          │
+│   3. If you're looking for something in your codebase..."              │
+│                                                                         │
+│  Then it ACTUALLY RUNS whoami and returns:                             │
+│  "Username: claude, User ID (UID): 1000, Group ID (GID): 1000"         │
+│                     ↑                                                   │
+│         This is the container's user, not the Telegram user!           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  CORRECT behavior for a personal assistant:                            │
+│                                                                         │
+│  "I'm not sure what you mean by finding your ID. Is there something    │
+│   else I can help you with? I can check the weather, help with         │
+│   recipes, or answer questions!"                                       │
+│                                                                         │
+│  OR simply:                                                             │
+│  "I don't have access to any IDs or system information. What else      │
+│   can I help you with?"                                                │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key behaviors to fix**:
+- Don't offer to run terminal commands like `whoami`, `id`, `grep`
+- Don't talk about "your codebase" or "your system"
+- Don't expose container internals (UID 1000, user "claude")
+- Don't talk about Telegram IDs, user IDs, or any technical IDs
+- Don't try to be "helpful" with technical/system questions - just deflect
+- DO act like a friendly personal assistant (weather, recipes, reminders)
+- DO say "I don't understand" for nonsensical/technical questions
+
+**The vibe**: Andee is like texting a helpful friend, not a technical CLI tool. A friend wouldn't know your "user ID" or offer to run `whoami`. They'd just say "what do you mean?" and move on.
+
+**Implementation notes**:
+- Research Agent SDK API for system prompt customization
+- May need to prepend to existing prompt or fully replace
+- Test that tools/skills still work with custom prompt
+- Explicitly tell it NOT to discuss IDs, system info, technical internals
+
+**Implementation location**: `claude-sandbox-worker/src/index.ts` (PERSISTENT_SERVER_SCRIPT)
+
+---
+
+## 12. Hide API Keys in Bash Commands (Use Environment Variables)
+
+**Problem**: When Claude Code runs curl commands to test endpoints, the API key is exposed directly in the command, making it visible in:
+- Terminal output/screenshots
+- Bash history (`~/.bash_history`)
+- Claude Code conversation logs
+- Screen recordings or demos
+
+**Current (Insecure)**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  $ curl -s -X POST https://claude-sandbox-worker.../reset \            │
+│      -H "Content-Type: application/json" \                              │
+│      -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \  ← EXPOSED!│
+│      -d '{"chatId":"test-direct-link"}'                                 │
+│                                                                         │
+│  Anyone who sees this command (screenshot, history, logs) has the key  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Proposed (Secure)**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  $ curl -s -X POST https://claude-sandbox-worker.../reset \            │
+│      -H "Content-Type: application/json" \                              │
+│      -H "X-API-Key: $ANDEE_API_KEY" \                        ← SAFE!   │
+│      -d '{"chatId":"test-direct-link"}'                                 │
+│                                                                         │
+│  Key is read from environment variable, never appears in output        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Implementation Approach**:
+
+1. **Update CLAUDE.md** - Tell Claude Code to ALWAYS use `$ANDEE_API_KEY` in example commands, never literal values
+
+2. **Update andee-ops skill** - Same instruction for deployment/testing commands
+
+3. **Update implement-s skill** - Remind to use env vars when testing
+
+4. **Load .env in shell session** - Ensure `.env` file variables are exported when starting development:
+   ```bash
+   # In .envrc (direnv) or shell profile
+   export $(cat claude-sandbox-worker/.dev.vars | xargs)
+   ```
+
+**Example fix in CLAUDE.md**:
+
+```markdown
+# Before (insecure)
+curl -X POST http://localhost:8787/reset \
+  -H "X-API-Key: adk_your_key_here" \
+  -d '{"chatId":"test"}'
+
+# After (secure)
+curl -X POST http://localhost:8787/reset \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"test"}'
+```
+
+**Key insight**: Claude Code already knows the key (it's in `.dev.vars`), so there's no reason to paste it literally into commands. Just reference the env var.
+
+**Implementation locations**:
+- `CLAUDE.md` - Update all curl examples to use `$ANDEE_API_KEY`
+- `.claude/skills/andee-ops/SKILL.md` - Same
+- `.claude/skills/implement-s/SKILL.md` - Same
+- Optional: Add `direnv` or shell hook to auto-load env vars
 
 ---
 

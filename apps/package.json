@@ -2,12 +2,18 @@
   "name": "@andee/apps",
   "version": "1.0.0",
   "type": "module",
-  "description": "Andee Telegram Mini Apps - unified static site",
+  "description": "Andee Telegram Mini Apps - Vite + TypeScript framework",
   "scripts": {
-    "dev": "npx wrangler pages dev src --port 8788",
-    "deploy": "npx wrangler pages deploy src --project-name=andee"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=andee",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.0.3",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0",
     "wrangler": "^4.0.0"
   }
 }

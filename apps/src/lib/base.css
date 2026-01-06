@@ -1,0 +1,115 @@
+/**
+ * Shared base styles for Mini App components.
+ *
+ * CSS variables are set by Telegram theme (via applyTheme()).
+ * Default values provide fallback for non-Telegram contexts.
+ */
+
+:root {
+  /* Default light theme - Telegram overrides these */
+  --bg-color: #ffffff;
+  --text-color: #000000;
+  --hint-color: #999999;
+  --card-bg: #f5f5f5;
+  --accent: #3390ec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-color: #1c1c1d;
+    --text-color: #ffffff;
+    --hint-color: #8e8e93;
+    --card-bg: #2c2c2e;
+  }
+}
+
+/* Reset */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* Base body */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    Roboto, sans-serif;
+  background: var(--bg-color);
+  color: var(--text-color);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Loading state */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--hint-color);
+  border-top-color: var(--text-color);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-text {
+  color: var(--hint-color);
+  font-size: 14px;
+}
+
+/* Error state */
+.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  text-align: center;
+}
+
+.error-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.error-text {
+  color: var(--hint-color);
+  font-size: 14px;
+}
+
+.error-detail {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--hint-color);
+  max-width: 280px;
+  word-break: break-all;
+  opacity: 0.7;
+}
+
+/* Card component */
+.card {
+  background: var(--card-bg);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+/* Hidden utility */
+.hidden {
+  display: none !important;
+}

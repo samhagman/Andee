@@ -5,208 +5,160 @@ description: How to format responses for Telegram. All Andee skills should follo
 
 # Telegram Response Formatting
 
-You are responding to a Telegram chat. The bot uses `parse_mode: "HTML"`, so follow these formatting rules.
+You are responding to a Telegram chat. The bot uses `parse_mode: "MarkdownV2"` with automatic escaping, so you can write **natural markdown** and it will render correctly.
 
 ## Parse Mode
 
-The Bot API supports basic formatting for messages including bold, italic, underlined, strikethrough, spoiler text, block quotations, inline links, and pre-formatted code. Telegram clients render these accordingly.
+The bot automatically converts your markdown to Telegram's MarkdownV2 format:
+- `**bold**` is converted to `*bold*` (Telegram's format)
+- Special characters are escaped automatically
+- Code blocks are preserved
 
-**Grammy ParseMode options:** `"HTML"` | `"Markdown"` | `"MarkdownV2"`
+**You can write natural markdown.** The escaping is handled by the bot.
 
-Andee uses **HTML mode** exclusively. Never output Markdown syntax.
-
-## Complete HTML Tag Reference
+## Supported Formatting
 
 ### Text Styling
 
-```html
-<b>bold</b> or <strong>bold</strong>
-<i>italic</i> or <em>italic</em>
-<u>underline</u> or <ins>underline</ins>
-<s>strikethrough</s> or <strike>strikethrough</strike> or <del>strikethrough</del>
-<span class="tg-spoiler">spoiler</span> or <tg-spoiler>spoiler</tg-spoiler>
+```
+*bold*  or  **bold**
+_italic_
+__underline__
+~strikethrough~  or  ~~strikethrough~~
+||spoiler text||
 ```
 
 ### Links
 
-```html
-<a href="http://www.example.com/">inline URL</a>
-<a href="tg://user?id=123456789">inline mention of a user</a>
 ```
-
-**Note:** Telegram clients show an alert before opening inline links ("Open this link?" with full URL).
-
-**User mentions:** Links like `tg://user?id=<user_id>` mention a user by ID without username. These only work inside inline links or inline keyboard buttons, and require the user to have contacted the bot previously.
+[link text](https://example.com)
+```
 
 ### Code
 
-```html
-<code>inline fixed-width code</code>
-<pre>pre-formatted fixed-width code block</pre>
-<pre><code class="language-python">code block with syntax highlighting</code></pre>
+```
+`inline code`
+
+\`\`\`
+code block
+\`\`\`
+
+\`\`\`python
+def hello():
+    print("Hello!")
+\`\`\`
 ```
 
-**Syntax highlighting:** Supported languages listed at libprisma. Common ones: `python`, `javascript`, `typescript`, `bash`, `json`, `sql`, `html`, `css`, `go`, `rust`, `java`, `c`, `cpp`.
+### Block Quotes
 
-**Note:** Programming language can only be specified with nested `<pre><code class="language-X">` tags, not standalone `<code>` tags.
-
-### Block Quotations
-
-```html
-<blockquote>Block quotation started
-Block quotation continued
-The last line of the block quotation</blockquote>
-
-<blockquote expandable>Expandable block quotation (collapsed by default)
-Hidden content here
-Click to expand</blockquote>
 ```
-
-### Nested Formatting
-
-Tags can be nested with these rules:
-- **bold**, **italic**, **underline**, **strikethrough**, and **spoiler** can contain and be contained by any other entities (except `pre` and `code`)
-- **blockquote** and **expandable blockquote** cannot be nested inside each other
-- **pre** and **code** cannot contain other entities
-
-Example of valid nesting:
-```html
-<b>bold <i>italic bold <s>italic bold strikethrough <span class="tg-spoiler">italic bold strikethrough spoiler</span></s> <u>underline italic bold</u></i> bold</b>
+> This is a block quote
+> It can span multiple lines
 ```
-
-## CRITICAL: Special Character Escaping
-
-**All `<`, `>`, and `&` symbols that are NOT part of a tag must be escaped:**
-
-| Character | Escape As |
-|-----------|-----------|
-| `<` | `&lt;` |
-| `>` | `&gt;` |
-| `&` | `&amp;` |
-| `"` | `&quot;` |
-
-**Examples:**
-- Math: `5 &lt; 10` renders as "5 < 10"
-- Code discussion: `if (x &gt; 0)` renders as "if (x > 0)"
-- Ampersands: `Tom &amp; Jerry` renders as "Tom & Jerry"
-
-**Failure to escape these characters will break the entire message formatting!**
 
 ## DO Use
 
-- `<b>text</b>` for important emphasis (headers, key terms)
-- `<i>text</i>` for secondary emphasis (asides, clarifications)
-- `<u>text</u>` sparingly for critical warnings
-- `<code>value</code>` for numbers, values, commands, or technical terms
-- `<pre>` for multi-line code or formatted output
-- `<blockquote>` for quoting external content
-- `<tg-spoiler>` for content users might want hidden initially
+- **Bold** for important emphasis (headers, key terms)
+- *Italic* for secondary emphasis (asides, clarifications)
+- `code` for numbers, values, commands, or technical terms
+- Code blocks for multi-line code or formatted output
+- Block quotes for quoting external content
 - Emojis liberally for visual appeal and quick scanning
 - Blank lines to separate logical sections
 - Short, scannable paragraphs (2-3 sentences max)
-- Line breaks to create visual hierarchy
-- **Bullet point emoji (•) for lists** - `<ul>` and `<li>` are NOT supported
+- **Bullet point character (•) for lists** - standard markdown lists are not supported
 
 ### Lists
 
-Telegram does NOT support `<ul>`, `<ol>`, or `<li>` tags. Use bullet emoji instead:
+Telegram does NOT support standard markdown lists (`- item` or `* item`). Use bullet emoji instead:
 
-```html
-<b>Features:</b>
+```
+**Features:**
 • First item
 • Second item
 • Third item
 ```
 
 For numbered lists, use plain numbers:
-```html
-<b>Steps:</b>
+```
+**Steps:**
 1. First step
 2. Second step
 3. Third step
 ```
 
 **Tip:** You can also use other emoji as bullets for visual variety:
-```html
-✅ Completed task
-⬜ Pending task
-🔹 Blue bullet
-➤ Arrow bullet
+```
+Done task
+Pending task
+Blue bullet
+Arrow bullet
 ```
 
-## DO NOT Use (Markdown)
+## DO NOT Use
 
-- `**markdown bold**` - shows as literal asterisks
-- `*markdown italic*` - shows as literal asterisks
-- `__underline__` - shows as literal underscores
-- `~~strikethrough~~` - shows as literal tildes
-- `---` horizontal rules - shows as literal dashes
-- `# Headers` - not rendered, shows as literal text
-- `| Tables |` - not supported
-- `[text](url)` markdown links - use `<a href="">` instead
-- ``` ```code``` ``` markdown code blocks - use `<pre>` instead
+**CRITICAL - These show as literal text, not formatted:**
 
-## Unsupported HTML Elements
+- `# Header`, `## Header`, `### Header` - Markdown headers DO NOT WORK. Use `**Bold Text**` instead.
+- `---` horizontal rules (shows as literal dashes)
+- `| Tables |` (not supported, use code blocks for tables)
+- `- list item` or `* list item` - Use • bullet emoji instead
 
-Many common HTML elements are NOT supported by Telegram. Using them will either show raw tags or break formatting entirely.
+**Wrong:**
+```
+### Sunday, January 12
+Content here
+```
 
-| Element | Status | Workaround |
-|---------|--------|------------|
-| `<h1>`-`<h6>` | Not supported | Use `<b>Header</b>` + blank line |
-| `<p>` | Not supported | Use blank lines between paragraphs |
-| `<br>` / `<br/>` | Not supported | Use actual newline characters |
-| `<hr>` | Not supported | Use blank line or emoji line (➖➖➖) |
-| `<ul>`, `<ol>`, `<li>` | Not supported | Use • bullet emoji or numbers |
-| `<table>`, `<tr>`, `<td>` | Not supported | Use `<pre>` with spaces for alignment |
-| `<div>`, `<span>` | Not supported | Exception: `<span class="tg-spoiler">` works |
-| `<img>` | Not supported | Send images as separate media |
-| `<sub>`, `<sup>` | Not supported | Use Unicode: ₁₂₃ or ¹²³ |
-| `<mark>` | Not supported | No highlight available |
-| `<small>`, `<big>` | Not supported | No text sizing |
-| `<center>` | Not supported | No alignment control |
-| `<font>`, `<color>` | Not supported | No color or font control |
-| `style="..."` | Not supported | No inline CSS |
-| `class="..."` | Not supported | Exception: `class="tg-spoiler"` works |
+**Correct:**
+```
+**Sunday, January 12**
+
+Content here
+```
+
+## Unsupported Elements
+
+| Element | Workaround |
+|---------|------------|
+| Headers | Use **Bold** + blank line |
+| Horizontal rules | Use blank line or emoji line |
+| Markdown lists | Use • bullet emoji or numbers |
+| Tables | Use code blocks with spaces for alignment |
+| Images | Send as separate media |
 
 ### Workaround Examples
 
 **Fake header:**
-```html
-<b>Section Title</b>
+```
+**Section Title**
 
 Content goes here...
 ```
 
 **Fake horizontal rule:**
-```html
+```
 First section
 
-➖➖➖➖➖➖➖➖
+
 
 Second section
 ```
 
-**Fake table using pre:**
-```html
-<pre>
+**Fake table using code block:**
+```
+\`\`\`
 Name        Age    City
-─────────────────────────
 Alice       28     Boston
 Bob         34     NYC
-</pre>
-```
-
-**Subscript/superscript with Unicode:**
-```html
-H₂O (water)
-E = mc²
+\`\`\`
 ```
 
 ## Other Things to Avoid
 
 - Sources/citations sections - clutters the message unnecessarily
 - Long paragraphs - hard to read on mobile
-- Unescaped `<`, `>`, or `&` characters outside of tags
+- Excessive formatting - keep it clean and readable
 
 ## Message Limits
 
@@ -222,26 +174,27 @@ E = mc²
 
 ## Example Good Response
 
-```html
-<b>Boston Weather</b>
+```
+**Boston Weather**
 
 Cold and cloudy today! Ranging -5°C to -1°C (23°F to 30°F).
 
-🌨️ Light snow (7am-11am) → ⛅ Partly cloudy (afternoon)
+Light snow (7am-11am) Partly cloudy (afternoon)
 
 Bundle up with 2-3 layers. Morning commute may be slippery!
 ```
 
 ## Example with Code
 
-```html
-<b>Here's how to do it:</b>
+```
+**Here's how to do it:**
 
-<pre><code class="language-python">def hello():
+\`\`\`python
+def hello():
     print("Hello, world!")
-</code></pre>
+\`\`\`
 
-Run with <code>python script.py</code>
+Run with `python script.py`
 ```
 
 ## Example Bad Response
@@ -260,18 +213,19 @@ The current conditions show that it is cold and cloudy today with temperatures r
 - [Boston coordinates](https://example.com)
 ```
 
-The bad example uses markdown that won't render, has unnecessary preamble, long paragraphs, horizontal rules, and a sources section.
+The bad example has unnecessary preamble, long paragraphs, horizontal rules, and a sources section.
 
 ## Quick Reference Card
 
 ```
-STYLING:           <b>bold</b>  <i>italic</i>  <u>underline</u>  <s>strike</s>
-SPOILER:           <tg-spoiler>hidden text</tg-spoiler>
-LINK:              <a href="URL">text</a>
-INLINE CODE:       <code>value</code>
-CODE BLOCK:        <pre>multi-line code</pre>
-SYNTAX HIGHLIGHT:  <pre><code class="language-python">code</code></pre>
-QUOTE:             <blockquote>quoted text</blockquote>
-LISTS:             • item  (no <ul>/<li>, use bullet emoji)
-ESCAPE:            &lt; &gt; &amp; &quot;
+STYLING:           *bold*  _italic_  __underline__  ~strikethrough~
+SPOILER:           ||hidden text||
+LINK:              [text](url)
+INLINE CODE:       `value`
+CODE BLOCK:        ```code```
+SYNTAX HIGHLIGHT:  ```python
+                   code
+                   ```
+QUOTE:             > quoted text
+LISTS:             • item  (use bullet emoji)
 ```

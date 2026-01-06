@@ -10,23 +10,27 @@ cd claude-sandbox-worker && npm run dev  # Terminal 1 (builds Docker on first ru
 cd claude-telegram-bot && npm run start  # Terminal 2
 
 # Test worker directly (no Telegram needed)
-curl http://localhost:8787/                                    # Health check
+# Note: All endpoints except health check require X-API-Key header
+curl http://localhost:8787/                                    # Health check (no auth)
 curl -X POST http://localhost:8787/ask \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"test","message":"Say hello","claudeSessionId":null}'
 
 # Streaming test
 curl -X POST http://localhost:8787/ask-stream \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"test","message":"Say hello","claudeSessionId":null}'
-curl "http://localhost:8787/poll?chatId=test"
+curl -H "X-API-Key: $ANDEE_API_KEY" "http://localhost:8787/poll?chatId=test"
 
 # Debug container issues
-curl http://localhost:8787/diag | jq .
+curl -H "X-API-Key: $ANDEE_API_KEY" http://localhost:8787/diag | jq .
 
 # Reset a chat's sandbox
 curl -X POST http://localhost:8787/reset \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"test"}'
 ```
 
@@ -67,9 +71,63 @@ Telegram bot powered by Claude Code Agent SDK with persistent server in Cloudfla
 
 **Port must match between services** (frequent source of `ECONNREFUSED` errors):
 - `claude-sandbox-worker/wrangler.toml`: `[dev] port = 8787`
-- `claude-telegram-bot/.env`: `SANDBOX_WORKER_URL=http://localhost:8787`
+- `claude-telegram-bot/.dev.vars`: Local development secrets (wrangler dev reads this)
 
-Both files have comments pointing to each other.
+Both services use port 8787 for local development.
+
+## Authentication
+
+Two-layer auth for MVP testing (prevents random users from using the bot):
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  LAYER 1: Telegram Allowlist (Bot)     LAYER 2: API Key (Worker)        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  ALLOWED_USER_IDS=123,456              ANDEE_API_KEY=adk_xxx            │
+│  ↓                                     ↓                                │
+│  Checks botCtx.from.id                 Checks X-API-Key header          │
+│  Works for private + group chats       All endpoints except /           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Find your Telegram user ID:**
+- Message `@userinfobot` on Telegram, OR
+- Check bot logs when messaging (prints `[AUTH] User xxx (ID: yyy)`)
+
+**Configuration (telegram-bot):**
+
+Two environment files with different purposes:
+
+```bash
+# LOCAL DEVELOPMENT: .dev.vars (wrangler dev reads this)
+BOT_TOKEN=xxx
+ANDEE_API_KEY=adk_xxx
+ALLOWED_USER_IDS=              # Empty = allow all users locally
+
+# PRODUCTION: .prod.env (deployed via npm run deploy-secrets)
+BOT_TOKEN=xxx
+ANDEE_API_KEY=adk_xxx
+ALLOWED_USER_IDS=123,456       # Comma-separated user IDs
+```
+
+**Configuration (sandbox-worker):**
+```bash
+# claude-sandbox-worker/.dev.vars
+ANDEE_API_KEY=adk_xxx          # Must match telegram-bot's key
+```
+
+**Deploy secrets:**
+```bash
+cd claude-telegram-bot
+npm run deploy           # Deploys secrets + code
+npm run deploy-secrets   # Secrets only
+npm run deploy-code      # Code only (no secrets)
+```
+
+**Generate a new API key:**
+```bash
+openssl rand -hex 16 | sed 's/^/adk_/'
+```
 
 ## Performance
 
@@ -98,7 +156,8 @@ Both files have comments pointing to each other.
 
 ```
 /Andee/.claude/skills/               ← FOR YOU (developer) using Claude Code
-└── andee-dev/SKILL.md                  to build Andee on your machine
+├── andee-ops/                          to build Andee on your machine
+└── andee-dev/
 
 /Andee/claude-sandbox-worker/.claude/skills/  ← FOR ANDEE (the bot) when
 └── weather/SKILL.md                             responding to Telegram users
@@ -106,55 +165,120 @@ Both files have comments pointing to each other.
 
 Andee IS a Claude Code-based bot. It has its own skills that get copied into its Docker container.
 
+**Developer Skills:**
+- **andee-ops** - Deployment guide. Use for: deploying to Cloudflare, setting secrets, configuring webhooks, container instance types
+- **andee-dev** - Development + debugging guide. Use for: creating skills, building Mini Apps, debugging issues, analyzing logs
+
 **To add a new skill for Andee (the bot):**
 1. Create directory: `claude-sandbox-worker/.claude/skills/{skill-name}/`
 2. Create `SKILL.md` with YAML frontmatter (`name`, `description`) and instructions
 3. Rebuild container: `cd claude-sandbox-worker && npm run dev`
 
-**For developer guidance:** Use the `andee-dev` skill in `/Andee/.claude/skills/` or ask "How do I add a new skill to Andee?"
-
 ## Mini Apps (Telegram Web Apps)
 
-Skills can provide rich UI via Telegram Mini Apps. Claude returns links in the format:
+Skills provide rich UI via Telegram Mini Apps using **Direct Link Mini Apps**. Claude returns links in this format:
 ```markdown
-[Button Text](webapp:https://andee-7rd.pages.dev/{app-name}/?data=...)
+[Button Text](https://t.me/HeyAndee_bot/app?startapp={component}_{base64url_data})
 ```
 
-The bot parses these and creates InlineKeyboard buttons. All Mini Apps are deployed together to a single Cloudflare Pages project.
+The link opens a **shell Mini App** that dynamically loads the requested component. This works in both private and group chats.
 
-**Unified Mini Apps structure (`/Andee/apps/`):**
+**startapp format:** `{component}_{base64url_data}`
+- `component`: Folder name in `apps/src/` (e.g., `weather`)
+- `base64url_data`: Base64url-encoded JSON (no `+`, `/`, or `=`)
+
+**Architecture:**
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  User taps: https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...   │
+│        ↓                                                                 │
+│  Shell (apps/src/app/) parses startapp, loads component in iframe       │
+│        ↓                                                                 │
+│  Component (apps/src/weather/) reads data from URL hash (#data=...)     │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Directory structure:**
 ```
 apps/
-├── package.json        # Single deployment for ALL apps
+├── package.json              # Vite + TypeScript
+├── vite.config.ts            # Multi-page app config
+├── tsconfig.json
 └── src/
-    ├── weather/        → https://andee-7rd.pages.dev/weather/
-    │   └── index.html
-    └── {new-app}/      → https://andee-7rd.pages.dev/{new-app}/
-        └── index.html
+    ├── lib/                  # SHARED LIBRARY
+    │   ├── telegram.ts       # initTelegram(), applyTheme(), getStartParam()
+    │   ├── base64url.ts      # encode(), decode()
+    │   ├── data.ts           # getData<T>() from URL hash
+    │   ├── base.css          # Shared styles, CSS variables
+    │   └── types/            # TypeScript interfaces (WeatherData, etc.)
+    ├── app/                  # Shell router
+    │   ├── index.html
+    │   └── main.ts
+    ├── weather/              # Weather component
+    │   ├── index.html
+    │   ├── main.ts
+    │   └── weather.css
+    └── {component}/          # Add new components here
 ```
 
 **Commands:**
 ```bash
-cd apps && npm run dev      # Local dev on port 8788 (all apps)
-                            # Access: http://localhost:8788/weather/
-cd apps && npm run deploy   # Deploy ALL apps to Cloudflare Pages
+cd apps && npm run dev        # Vite dev server on port 8788
+cd apps && npm run build      # Build to dist/
+cd apps && npm run preview    # Preview built files locally
+cd apps && npm run typecheck  # TypeScript validation
+cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 ```
 
-**Adding a new Mini App:**
-1. Create directory: `mkdir -p apps/src/{app-name}`
-2. Create `index.html` with Telegram WebApp SDK
-3. Deploy: `cd apps && npm run deploy`
+**Adding a new component:**
+1. Create directory: `mkdir -p apps/src/{component-name}`
+2. Create `index.html` (minimal HTML entry)
+3. Create `main.ts` importing shared utilities:
+   ```typescript
+   import { initTelegram, getData } from '../lib';
+   import type { MyData } from '../lib/types/mydata';
+
+   initTelegram();
+   const { data, error } = getData<MyData>();
+   // ... render component
+   ```
+4. Add entry to `vite.config.ts` rollupOptions.input
+5. Add TypeScript interface in `apps/src/lib/types/`
+6. Deploy: `cd apps && npm run deploy`
+7. Update skill to generate links with new component name
 
 ## Key Files
 
 - `claude-sandbox-worker/src/index.ts` - Worker with `PERSISTENT_SERVER_SCRIPT` (streaming input mode), endpoints, Sandbox SDK orchestration
 - `claude-sandbox-worker/Dockerfile` - Container image with Claude CLI, Agent SDK, port 8080 exposed
 - `claude-sandbox-worker/.claude/skills/` - Andee's runtime skills (for responding to users)
-- `claude-telegram-bot/src/index.ts` - Grammy bot with webhook handler and InlineKeyboard support
-- `apps/src/weather/index.html` - Weather Mini App
-- `apps/package.json` - Unified Mini Apps deployment config
+- `claude-telegram-bot/src/index.ts` - Grammy bot with webhook handler
+- `apps/src/lib/` - Shared Mini App library (Telegram utils, base64url, types)
+- `apps/src/app/main.ts` - Shell router (parses startapp, loads components)
+- `apps/src/weather/main.ts` - Weather component
+- `apps/vite.config.ts` - Vite multi-page app build configuration
 - `.claude/skills/` - Developer skills (for you when building Andee)
-- `.claude/skills/andee-ops/` - Operations guide for debugging/deploying
+
+## Endpoints Reference
+
+### claude-sandbox-worker
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/` | GET | Health check |
+| `/ask` | POST | Synchronous query (waits for response) |
+| `/ask-telegram` | POST | Fire-and-forget (agent sends to Telegram directly) |
+| `/logs?chatId=X` | GET | Read agent logs from container |
+| `/reset` | POST | Destroy sandbox + delete R2 session |
+| `/session-update` | POST | Update session in R2 (called by agent) |
+| `/diag` | GET | Run diagnostics on container |
+
+### claude-telegram-bot
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/` | GET | Health check |
+| `/` | POST | Telegram webhook (Grammy handler) |
 
 ## LLM Context
 

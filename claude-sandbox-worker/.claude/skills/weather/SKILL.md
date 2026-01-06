@@ -7,7 +7,7 @@ description: Get weather information including current conditions, temperature r
 
 Provides weather information with a conversational summary and a Mini App button for detailed view.
 
-**IMPORTANT: Follow the telegram-response skill guidelines for formatting. Use HTML tags, not markdown.**
+**IMPORTANT: Follow the telegram-response skill guidelines for formatting. Use natural markdown.**
 
 ## Instructions
 
@@ -68,13 +68,13 @@ From the API response, extract:
 
 1. **Show both Celsius AND Fahrenheit** for ALL temperatures
 2. **DO NOT include Sources section** - no citations, no links to data sources
-3. **DO NOT use markdown** - no `**bold**`, no `---`, no `# headers`
-4. **Use HTML tags** if emphasis needed: `<b>bold</b>`, `<i>italic</i>`
+3. **Use `**bold**` for headers** - NOT `###` markdown headers (they show as literal `###` text)
+4. Use `_italic_` for alerts
 
 **CRITICAL: USE SPECIFIC TIMES, NOT VAGUE PERIODS**
 
-❌ BAD: "morning", "afternoon", "evening", "later today"
-✅ GOOD: "6am-12pm", "starting around 7pm", "3pm-8pm"
+BAD: "morning", "afternoon", "evening", "later today"
+GOOD: "6am-12pm", "starting around 7pm", "3pm-8pm"
 
 Always include the specific hour when weather changes occur. The hourly data tells you exactly when - use it!
 
@@ -88,9 +88,9 @@ Always include the specific hour when weather changes occur. The hourly data tel
 
 **Response template:**
 ```
-<b>{Location} Weather - {Date Context}</b>
+**{Location} Weather - {Date Context}**
 
-<i>{Alert emoji} {Alert type}: {description} starting around {SPECIFIC TIME}</i>
+_{Alert emoji} {Alert type}: {description} starting around {SPECIFIC TIME}_
 
 Ranging {low}°C to {high}°C ({low_f}°F to {high_f}°F).
 
@@ -100,53 +100,53 @@ Ranging {low}°C to {high}°C ({low_f}°F to {high_f}°F).
 
 {Clothing recommendation}.
 
-[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data={BASE64URL_JSON})
+[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_{BASE64URL_JSON})
 ```
 
 **Example response (with weather event):**
 ```
-<b>Boston Weather - Tomorrow (Jan 5)</b>
+**Boston Weather - Tomorrow (Jan 5)**
 
-<i>🌨️ Snow Alert: Snow showers expected starting around 7pm</i>
+_Snow Alert: Snow showers expected starting around 7pm_
 
 Ranging -10°C to -3°C (14°F to 27°F).
 
-• 🌤️ Clear/Partly Cloudy (6am-6pm)
-• 🌨️ Snow Showers (7pm-11pm)
+• Clear/Partly Cloudy (6am-6pm)
+• Snow Showers (7pm-11pm)
 
 Layer up with 3-4 layers, wear a scarf and gloves, and bring boots for the evening snow!
 
-[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data=eyJsb2Mi...)
+[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...)
 ```
 
 **Example response (multiple transitions):**
 ```
-<b>Boston Weather - Today</b>
+**Boston Weather - Today**
 
 Ranging -5°C to 3°C (23°F to 37°F).
 
-• ☁️ Overcast (12am-6am)
-• 🌨️ Light Snow (7am-10am)
-• 🌤️ Partly Cloudy (11am-4pm)
-• ☁️ Cloudy (5pm-11pm)
+• Overcast (12am-6am)
+• Light Snow (7am-10am)
+• Partly Cloudy (11am-4pm)
+• Cloudy (5pm-11pm)
 
 Light jacket with a hat for the morning snow.
 
-[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data=eyJsb2Mi...)
+[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...)
 ```
 
 **Example response (calm day, no alert needed):**
 ```
-<b>Boston Weather - Today</b>
+**Boston Weather - Today**
 
 Ranging 5°C to 12°C (41°F to 54°F).
 
-• ☁️ Overcast (6am-3pm)
-• 🌤️ Partly Cloudy (4pm-9pm)
+• Overcast (6am-3pm)
+• Partly Cloudy (4pm-9pm)
 
 A light jacket should be fine today.
 
-[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data=eyJsb2Mi...)
+[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2Mi...)
 ```
 
 **When to include Weather Alert line:**
@@ -159,15 +159,13 @@ A light jacket should be fine today.
 **DO NOT ADD:**
 - Sources section
 - Citations or reference links
-- "---" horizontal dividers
-- Any markdown formatting
 - Vague time references like "morning" or "evening" without specific hours
 
 ### 5. Generate Mini App Data
 
 **CRITICAL: Keep the data MINIMAL to avoid corruption. DO NOT include hourly data.**
 
-Create a COMPACT JSON (under 300 characters) with this exact structure:
+Create a COMPACT JSON (under 300 characters) matching the `WeatherDataCompact` interface defined in `apps/src/lib/types/weather.ts`:
 
 ```json
 {"loc":"Boston","c":-2,"f":28,"fl":-7,"lo":-6,"hi":-2,"wc":3}
@@ -182,50 +180,56 @@ Fields (all required, use integers):
 - `hi`: High temp Celsius (integer)
 - `wc`: Weather code (integer)
 
-**To generate the webapp link:**
+**TypeScript interface reference:** `apps/src/lib/types/weather.ts`
+
+**To generate the Direct Link Mini App URL:**
 1. Create the compact JSON exactly as shown above
 2. Base64 encode it (will be ~80 chars)
-3. Remove trailing `=` padding (base64url style)
-4. **IMPORTANT: Use HASH (`#data=`) not query params (`?data=`)** - Telegram strips query params!
-5. Format: `[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data=BASE64_HERE)`
+3. Convert to base64url: replace `+` with `-`, `/` with `_`, remove trailing `=`
+4. Format: `https://t.me/HeyAndee_bot/app?startapp=weather_{BASE64URL}`
+
+**startapp format:** `{component}_{base64url_data}`
+- `component`: The Mini App to load (e.g., `weather`)
+- `base64url_data`: The base64url-encoded JSON data
 
 **Example with real encoding:**
 JSON: `{"loc":"Boston","c":-3,"f":27,"fl":-7,"lo":-6,"hi":-2,"wc":3}`
 Base64url (no padding): `eyJsb2MiOiJCb3N0b24iLCJjIjotMywiZiI6MjcsImZsIjotNywibG8iOi02LCJoaSI6LTIsIndjIjozfQ`
 
-Full link: `[View Full Weather Report](webapp:https://andee-7rd.pages.dev/weather/#data=eyJsb2MiOiJCb3N0b24iLCJjIjotMywiZiI6MjcsImZsIjotNywibG8iOi02LCJoaSI6LTIsIndjIjozfQ)`
+Full link: `[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2MiOiJCb3N0b24iLCJjIjotMywiZiI6MjcsImZsIjotNywibG8iOi02LCJoaSI6LTIsIndjIjozfQ)`
 
 ## Weather Code Reference
 
 | Code | Weather | Emoji |
 |------|---------|-------|
-| 0 | Clear sky | ☀️ |
-| 1 | Mainly clear | 🌤️ |
-| 2 | Partly cloudy | ⛅ |
-| 3 | Overcast | ☁️ |
-| 45, 48 | Fog | 🌫️ |
-| 51, 53, 55 | Drizzle | 🌦️ |
-| 61, 63, 65 | Rain | 🌧️ |
-| 71, 73, 75 | Snow | 🌨️ |
-| 77 | Snow grains | ❄️ |
-| 80, 81, 82 | Rain showers | 🌧️ |
-| 85, 86 | Snow showers | 🌨️ |
-| 95 | Thunderstorm | ⛈️ |
+| 0 | Clear sky | |
+| 1 | Mainly clear | |
+| 2 | Partly cloudy | |
+| 3 | Overcast | |
+| 45, 48 | Fog | |
+| 51, 53, 55 | Drizzle | |
+| 61, 63, 65 | Rain | |
+| 71, 73, 75 | Snow | |
+| 77 | Snow grains | |
+| 80, 81, 82 | Rain showers | |
+| 85, 86 | Snow showers | |
+| 95 | Thunderstorm | |
 
 ## Clothing Recommendations
 
-Base recommendations on the LOW temperature (worst case):
+**IMPORTANT: Give a SINGLE definitive layer count. Never say "2-3 layers" or "3-4 layers".
+Use the LOW temperature to determine the layer count and commit to ONE number.**
 
-| Low Temp | Recommendation |
-|----------|----------------|
-| Below -10°C (14°F) | 4 layers + thermal pants, scarf, gloves required |
-| -10°C to -5°C (14-23°F) | 3-4 layers, scarf recommended |
-| -5°C to 1°C (23-34°F) | 2-3 layers, light jacket or sweater |
-| 1°C to 10°C (34-50°F) | 1-2 layers, light jacket |
-| 10°C to 20°C (50-68°F) | Single layer, maybe light sweater |
-| Above 20°C (68°F) | Light clothing |
+| Low Temp | Layers | Accessories |
+|----------|--------|-------------|
+| Below 14°F (-10°C) | 4 layers | thermal pants, scarf, gloves, boots |
+| 14°F to 23°F (-10°C to -5°C) | 4 layers | scarf, gloves |
+| 23°F to 42°F (-5°C to 5°C) | 3 layers | hat, light scarf |
+| 42°F to 58°F (5°C to 14°C) | 2 layers | light jacket |
+| 58°F to 70°F (14°C to 21°C) | 1 layer | - |
+| Above 70°F (21°C) | Light clothing | - |
 
 **Add to recommendation if:**
-- Rain expected: "Bring an umbrella"
-- Snow expected: "Wear boots"
-- High wind: "Wind-resistant outer layer"
+• Rain expected: "Bring an umbrella"
+• Snow expected: "Wear boots"
+• High wind: "Wind-resistant outer layer"

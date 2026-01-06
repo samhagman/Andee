@@ -1,272 +1,300 @@
 ---
 name: telegram-mini-app-dev
-description: Guide for building Telegram Mini Apps that integrate with Andee bot. Use when creating new Mini Apps, debugging data passing issues, or understanding the webapp link convention.
+description: Guide for building Telegram Mini Apps that integrate with Andee bot. Use when creating new Mini Apps, debugging data passing issues, or understanding the Direct Link Mini App convention.
 ---
 
 # Telegram Mini App Development Guide
 
-This skill documents the patterns and gotchas for building Telegram Mini Apps that work with the Andee bot.
+This skill documents patterns for building Telegram Mini App components using the Vite + TypeScript framework.
 
-## Architecture Overview
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    MINI APP DATA FLOW                                       │
+│                    MINI APPS FRAMEWORK (Vite + TypeScript)                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  1. Claude generates response with webapp: link                             │
-│     [Button Text](webapp:https://andee-7rd.pages.dev/app/#data=BASE64)     │
+│  LINK FORMAT:                                                               │
+│  https://t.me/HeyAndee_bot/app?startapp={component}_{base64url_data}       │
 │                                                                             │
-│  2. Grammy bot parses webapp: links → InlineKeyboard                        │
-│     keyboard.webApp(text, url)                                              │
-│                                                                             │
-│  3. User taps button → Telegram opens Mini App                              │
-│                                                                             │
-│  4. Mini App reads data from URL HASH (not query params!)                   │
-│     window.location.hash → #data=BASE64&tgWebAppVersion=...                │
+│  BUILD SYSTEM:                                                              │
+│  src/lib/          src/app/         src/weather/      src/{component}/      │
+│  ┌──────────┐      ┌──────────┐     ┌──────────┐      ┌──────────┐         │
+│  │telegram.ts│◄────│main.ts   │     │main.ts   │◄─────│main.ts   │         │
+│  │base64url.ts│    │index.html│     │index.html│      │index.html│         │
+│  │data.ts    │◄────────────────────┬┘            ◄────┘                    │
+│  │base.css   │                     │                                        │
+│  │types/     │◄────────────────────┘                                        │
+│  └──────────┘                                                               │
+│       │                                                                     │
+│       ▼ npm run build (Vite)                                                │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  dist/app/index.html  │  dist/weather/index.html  │  dist/assets/*   │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│       │                                                                     │
+│       ▼ npm run deploy (Cloudflare Pages)                                   │
+│  https://andee-7rd.pages.dev/                                               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Critical: URL Hash vs Query Params
-
-**Telegram Mini Apps pass data via the URL HASH (`#`), NOT query parameters (`?`).**
-
-### Why This Matters
+## Link Format
 
 ```
-WRONG (will fail):
-https://andee-7rd.pages.dev/weather/?data=eyJsb2Mi...
-                                    ↑
-                            Query param - gets stripped!
-
-CORRECT (works):
-https://andee-7rd.pages.dev/weather/#data=eyJsb2Mi...
-                                    ↑
-                            Hash - preserved by Telegram!
+https://t.me/HeyAndee_bot/app?startapp={component}_{base64url_data}
 ```
 
-When Telegram opens a Mini App:
-1. It may strip or ignore custom query parameters
-2. It APPENDS its own parameters to the hash (tgWebAppVersion, tgWebAppData, etc.)
-3. Your data in the hash is preserved alongside Telegram's params
+**startapp format:** `{component}_{base64url_data}`
 
-### Reading Data in Mini App
+| Part | Description | Example |
+|------|-------------|---------|
+| `component` | Component folder name | `weather` |
+| `_` | Separator | `_` |
+| `base64url_data` | Encoded JSON | `eyJsb2MiOiJCb3N0b24ifQ` |
 
-```javascript
-function extractDataParam() {
-  // Try hash first (Telegram's method)
-  const hash = window.location.hash.slice(1); // Remove leading #
-  if (hash) {
-    const hashParams = new URLSearchParams(hash);
-    const hashData = hashParams.get('data');
-    if (hashData) return { data: hashData, source: 'hash' };
-  }
+**Constraints:**
+- Characters allowed: A-Z, a-z, 0-9, `_`, `-`
+- Max length: 512 characters
 
-  // Fallback to query params (for direct browser testing)
-  const searchParams = new URLSearchParams(window.location.search);
-  const searchData = searchParams.get('data');
-  if (searchData) return { data: searchData, source: 'query' };
+## Shared Library (`apps/src/lib/`)
 
-  return { data: null, source: 'none' };
-}
-```
+All components import from the shared library:
 
-## Base64url Encoding
-
-Standard base64 uses characters that can cause issues in URLs:
-- `+` → should be `-`
-- `/` → should be `_`
-- `=` → padding, should be removed
-
-### Encoding (in skill/Claude response)
-
-```javascript
-// Standard base64
-const base64 = btoa(JSON.stringify(data));
-// Convert to base64url (remove padding)
-const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-```
-
-### Decoding (in Mini App)
-
-```javascript
-function base64urlToBase64(base64url) {
-  let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
-  // Add padding if needed
-  const pad = base64.length % 4;
-  if (pad) {
-    base64 += '='.repeat(4 - pad);
-  }
-  return base64;
-}
-
-// Usage
-const json = atob(base64urlToBase64(dataParam));
-const data = JSON.parse(json);
-```
-
-## webapp: Link Convention
-
-Claude returns links in markdown format that the bot parses:
-
-```markdown
-[Button Text](webapp:https://andee-7rd.pages.dev/app-name/#data=BASE64URL)
-```
-
-The Grammy bot extracts these with regex and creates InlineKeyboard buttons:
+### Telegram Utilities (`telegram.ts`)
 
 ```typescript
-const webappRegex = /\[([^\]]+)\]\(webapp:(https?:\/\/[^)]+)\)/g;
+import { initTelegram, applyTheme, getStartParam } from '../lib';
 
-// Creates Telegram web_app button
-keyboard.webApp(buttonText, url);
+// Initialize Telegram WebApp + apply theme
+initTelegram();
+
+// Get startapp parameter (for shell router)
+const param = getStartParam();  // "weather_eyJsb2Mi..."
 ```
 
-## Compact Data Format
+### Base64url (`base64url.ts`)
 
-Keep JSON minimal to avoid URL length issues:
+```typescript
+import { encode, decode } from '../lib';
 
-```json
-// BAD - too verbose
-{"location":"Boston, MA","currentTemp":25,"feelsLike":22}
+// Encode (in skills, not Mini Apps)
+const encoded = encode({ loc: "Boston", c: -3 });
 
-// GOOD - compact keys
-{"loc":"Boston","c":25,"fl":22}
+// Decode (generic, typed)
+const data = decode<MyData>(encoded);
 ```
 
-The Mini App should normalize compact format to full format for rendering.
+### Data Extraction (`data.ts`)
 
-## Mini App Template
+```typescript
+import { getData } from '../lib';
+import type { WeatherData } from '../lib/types';
+
+const { data, error } = getData<WeatherData>();
+if (error) {
+  showError(error.message);
+} else if (data) {
+  render(data);
+}
+```
+
+### TypeScript Types (`types/`)
+
+Each component should have its data interface in `apps/src/lib/types/`:
+
+```typescript
+// apps/src/lib/types/mycomponent.ts
+export interface MyComponentData {
+  title: string;
+  items: string[];
+}
+
+// apps/src/lib/types/index.ts
+export * from './mycomponent';
+```
+
+## Creating a New Component
+
+### 1. Create Directory Structure
+
+```bash
+mkdir -p apps/src/{component-name}
+```
+
+### 2. Add TypeScript Interface
+
+Create `apps/src/lib/types/{component}.ts`:
+
+```typescript
+export interface MyComponentData {
+  title: string;
+  value: number;
+}
+```
+
+Export from `apps/src/lib/types/index.ts`:
+
+```typescript
+export * from './mycomponent';
+```
+
+### 3. Create index.html
+
+Minimal HTML entry point:
 
 ```html
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>My Component</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="../lib/base.css">
 </head>
 <body>
-  <div id="app"></div>
-  <script>
-    // Initialize Telegram WebApp
-    const tg = window.Telegram?.WebApp;
-    if (tg) {
-      tg.ready();
-      tg.expand();
-
-      // Apply Telegram theme
-      if (tg.themeParams) {
-        const tp = tg.themeParams;
-        if (tp.bg_color) document.body.style.background = tp.bg_color;
-        if (tp.text_color) document.body.style.color = tp.text_color;
-      }
-    }
-
-    // Base64url decoder
-    function base64urlToBase64(b64url) {
-      let b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
-      const pad = b64.length % 4;
-      if (pad) b64 += '='.repeat(4 - pad);
-      return b64;
-    }
-
-    // Extract data from hash or query
-    function getData() {
-      const hash = window.location.hash.slice(1);
-      if (hash) {
-        const params = new URLSearchParams(hash);
-        const data = params.get('data');
-        if (data) return JSON.parse(atob(base64urlToBase64(data)));
-      }
-      const search = new URLSearchParams(window.location.search);
-      const data = search.get('data');
-      if (data) return JSON.parse(atob(base64urlToBase64(data)));
-      return null;
-    }
-
-    // Main
-    const data = getData();
-    if (data) {
-      document.getElementById('app').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
-    } else {
-      document.getElementById('app').innerHTML = '<p>No data provided</p>';
-    }
-  </script>
+  <div id="app">
+    <!-- Component HTML structure -->
+  </div>
+  <script type="module" src="./main.ts"></script>
 </body>
 </html>
+```
+
+### 4. Create main.ts
+
+```typescript
+import { initTelegram, getData } from '../lib';
+import type { MyComponentData } from '../lib/types';
+import './component.css';  // Optional component-specific styles
+
+// Initialize Telegram
+initTelegram();
+
+// Get data from URL
+const { data, error } = getData<MyComponentData>();
+
+if (error) {
+  document.getElementById('app')!.innerHTML = `
+    <div class="error">Error: ${error.message}</div>
+  `;
+} else if (!data) {
+  document.getElementById('app')!.innerHTML = `
+    <div class="error">No data provided</div>
+  `;
+} else {
+  // Render component
+  render(data);
+}
+
+function render(data: MyComponentData): void {
+  document.getElementById('app')!.innerHTML = `
+    <h1>${data.title}</h1>
+    <p>Value: ${data.value}</p>
+  `;
+}
+```
+
+### 5. Add to Vite Config
+
+Edit `apps/vite.config.ts`:
+
+```typescript
+rollupOptions: {
+  input: {
+    app: resolve(__dirname, "src/app/index.html"),
+    weather: resolve(__dirname, "src/weather/index.html"),
+    mycomponent: resolve(__dirname, "src/mycomponent/index.html"),  // Add this
+  },
+},
+```
+
+### 6. Build & Test
+
+```bash
+cd apps
+npm run typecheck    # Verify types
+npm run dev          # Test at http://localhost:8788/mycomponent/#data={base64url}
+npm run build        # Build for production
+```
+
+### 7. Deploy
+
+```bash
+cd apps && npm run deploy
+```
+
+### 8. Update Skill
+
+In `claude-sandbox-worker/.claude/skills/{skill}/SKILL.md`, generate links:
+
+```markdown
+[Open Component](https://t.me/HeyAndee_bot/app?startapp=mycomponent_{base64url})
+```
+
+## Commands
+
+```bash
+cd apps
+npm run dev          # Vite dev server (port 8788)
+npm run build        # Build to dist/
+npm run typecheck    # TypeScript validation
+npm run preview      # Preview built files
+npm run deploy       # Build + deploy to Cloudflare Pages
+```
+
+## Testing
+
+**Test component directly:**
+```
+http://localhost:8788/weather/#data={base64url}
+https://andee-7rd.pages.dev/weather/#data={base64url}
+```
+
+**Test via shell:**
+```
+http://localhost:8788/app/?startapp=weather_{base64url}
+https://andee-7rd.pages.dev/app/?startapp=weather_{base64url}
 ```
 
 ## Directory Structure
 
 ```
-Andee/
-├── apps/                          # All Mini Apps (Cloudflare Pages)
-│   ├── package.json               # npm run deploy → deploys all apps
-│   └── src/
-│       ├── weather/index.html     # → andee-7rd.pages.dev/weather/
-│       └── {new-app}/index.html   # → andee-7rd.pages.dev/{new-app}/
-│
-└── claude-sandbox-worker/
-    └── .claude/skills/
-        └── {skill}/SKILL.md       # Skills that generate webapp: links
+apps/
+├── package.json              # Vite + TypeScript
+├── vite.config.ts            # Multi-page app config
+├── tsconfig.json
+└── src/
+    ├── lib/                  # SHARED LIBRARY
+    │   ├── index.ts          # Re-exports
+    │   ├── telegram.ts       # initTelegram(), applyTheme()
+    │   ├── base64url.ts      # encode(), decode()
+    │   ├── data.ts           # getData<T>()
+    │   ├── base.css          # Shared styles
+    │   └── types/
+    │       ├── index.ts
+    │       └── weather.ts    # WeatherData interface
+    ├── app/                  # Shell router
+    │   ├── index.html
+    │   ├── main.ts
+    │   └── shell.css
+    ├── weather/              # Weather component
+    │   ├── index.html
+    │   ├── main.ts
+    │   └── weather.css
+    └── {component}/          # Add new components
+        ├── index.html
+        ├── main.ts
+        └── component.css
 ```
 
-## Adding a New Mini App
+## Common Issues
 
-1. **Create the app:**
-   ```bash
-   mkdir -p apps/src/{app-name}
-   # Create index.html with template above
-   ```
-
-2. **Deploy:**
-   ```bash
-   cd apps && npm run deploy
-   ```
-
-3. **Create corresponding skill** (if needed):
-   ```bash
-   mkdir -p claude-sandbox-worker/.claude/skills/{skill-name}
-   # Create SKILL.md with instructions to generate webapp: link
-   ```
-
-4. **Rebuild sandbox container:**
-   ```bash
-   cd claude-sandbox-worker && npm run dev
-   ```
-
-## Debugging Tips
-
-### Add Debug Output
-
-When things aren't working, add debug info to error states:
-
-```javascript
-const debugInfo = `URL: ${window.location.href.substring(0, 60)}... | Hash: ${window.location.hash.substring(0, 40)}... | Source: ${dataSource}`;
-
-showError('Failed to load', debugInfo);
-```
-
-### Test Without Telegram
-
-Open the Mini App directly in browser with hash:
-```
-https://andee-7rd.pages.dev/weather/#data=eyJsb2MiOiJCb3N0b24ifQ
-```
-
-### Common Issues
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| "No data provided" | Using `?data=` instead of `#data=` | Change to hash-based URL |
-| Garbled JSON | Standard base64 with `+/=` chars | Use base64url encoding |
-| Button doesn't appear | Regex not matching | Check `webapp:` prefix in link |
-| Mini App blank | JS error | Check browser console |
-
-## References
-
-- [Telegram Mini Apps Docs](https://core.telegram.org/bots/webapps)
-- [Launch Parameters](https://docs.telegram-mini-apps.com/platform/launch-parameters)
-- [Grammy InlineKeyboard](https://grammy.dev/plugins/keyboard)
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| "No data" | Missing hash | Ensure URL has `#data=` |
+| Garbled text | Standard base64 | Use base64url encoding |
+| Component blank | JS error | Check browser console |
+| Link not clickable | Special chars | Only use allowed chars |
+| TypeScript error | Missing type | Add interface to `lib/types/` |
+| Build fails | Missing entry | Add to `vite.config.ts` input |

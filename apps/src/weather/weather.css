@@ -1,0 +1,248 @@
+/**
+ * Weather component styles.
+ * Extends base.css for weather-specific UI.
+ */
+
+:root {
+  --secondary-text: var(--hint-color);
+  --range-bg: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+body {
+  padding: 16px;
+  padding-bottom: 32px;
+  min-height: 100vh;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.location {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.unit-toggle {
+  background: var(--card-bg);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--text-color);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.unit-toggle:active {
+  opacity: 0.7;
+}
+
+.current-card {
+  background: var(--card-bg);
+  border-radius: 20px;
+  padding: 24px;
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.weather-icon {
+  font-size: 64px;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+
+.current-temp {
+  font-size: 56px;
+  font-weight: 300;
+  letter-spacing: -2px;
+}
+
+.current-temp-secondary {
+  font-size: 24px;
+  color: var(--secondary-text);
+  font-weight: 400;
+}
+
+.feels-like {
+  color: var(--secondary-text);
+  margin-top: 8px;
+  font-size: 15px;
+}
+
+.range-card {
+  background: var(--range-bg);
+  border-radius: 20px;
+  padding: 20px;
+  color: white;
+  margin-bottom: 16px;
+}
+
+.range-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.9;
+  margin-bottom: 12px;
+}
+
+.range-temps {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.range-item {
+  text-align: center;
+}
+
+.range-label {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 4px;
+}
+
+.range-value {
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.range-secondary {
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.range-divider {
+  font-size: 24px;
+  opacity: 0.5;
+}
+
+.transitions-card {
+  background: var(--card-bg);
+  border-radius: 20px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--secondary-text);
+  margin-bottom: 12px;
+}
+
+.transition-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  padding: 8px 0;
+}
+
+.transition-arrow {
+  color: var(--secondary-text);
+}
+
+.transition-time {
+  color: var(--secondary-text);
+  font-size: 14px;
+}
+
+.hourly-section {
+  margin-bottom: 16px;
+}
+
+.hourly-scroll {
+  display: flex;
+  overflow-x: auto;
+  gap: 8px;
+  padding: 4px 0;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.hourly-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.hour-card {
+  flex-shrink: 0;
+  background: var(--card-bg);
+  border-radius: 16px;
+  padding: 12px 14px;
+  text-align: center;
+  min-width: 64px;
+}
+
+.hour-time {
+  font-size: 13px;
+  color: var(--secondary-text);
+  font-weight: 500;
+}
+
+.hour-icon {
+  font-size: 28px;
+  margin: 8px 0;
+  line-height: 1;
+}
+
+.hour-temp {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.hour-precip {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.recommendations {
+  background: var(--card-bg);
+  border-radius: 20px;
+  padding: 16px 20px;
+}
+
+.rec-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  font-size: 15px;
+}
+
+.rec-item:not(:last-child) {
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.rec-icon {
+  font-size: 24px;
+}
+
+.generated-at {
+  text-align: center;
+  font-size: 12px;
+  color: var(--secondary-text);
+  margin-top: 20px;
+}
+
+.error-state {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.error-state .error-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.error-state .error-text {
+  color: var(--secondary-text);
+}
