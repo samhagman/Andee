@@ -23,28 +23,34 @@ export function createDefaultSession(): SessionData {
 
 /**
  * Generates the R2 key for a session.
- * New structure:
+ * Structure:
  *   Private: sessions/{senderId}/{chatId}.json
  *   Groups:  sessions/groups/{chatId}.json
+ *
+ * @throws Error if senderId or isGroup is not provided (prevents isolation bypass)
  */
 export function getSessionKey(
   chatId: string,
   senderId?: string,
   isGroup?: boolean
 ): string {
-  if (senderId !== undefined && isGroup !== undefined) {
-    return isGroup
-      ? `sessions/groups/${chatId}.json`
-      : `sessions/${senderId}/${chatId}.json`;
+  if (senderId === undefined || isGroup === undefined) {
+    throw new Error(
+      `getSessionKey requires senderId and isGroup for chat ${chatId} (got senderId=${senderId}, isGroup=${isGroup})`
+    );
   }
-  return `sessions/${chatId}.json`; // Legacy fallback
+  return isGroup
+    ? `sessions/groups/${chatId}.json`
+    : `sessions/${senderId}/${chatId}.json`;
 }
 
 /**
  * Generates the R2 key for a snapshot.
- * New structure:
+ * Structure:
  *   Private: snapshots/{senderId}/{chatId}/{timestamp}.tar.gz
  *   Groups:  snapshots/groups/{chatId}/{timestamp}.tar.gz
+ *
+ * @throws Error if senderId or isGroup is not provided (prevents isolation bypass)
  */
 export function getSnapshotKey(
   chatId: string,
@@ -52,27 +58,33 @@ export function getSnapshotKey(
   isGroup?: boolean,
   timestamp?: string
 ): string {
-  const ts = timestamp || new Date().toISOString().replace(/[:.]/g, "-");
-  if (senderId !== undefined && isGroup !== undefined) {
-    return isGroup
-      ? `snapshots/groups/${chatId}/${ts}.tar.gz`
-      : `snapshots/${senderId}/${chatId}/${ts}.tar.gz`;
+  if (senderId === undefined || isGroup === undefined) {
+    throw new Error(
+      `getSnapshotKey requires senderId and isGroup for chat ${chatId} (got senderId=${senderId}, isGroup=${isGroup})`
+    );
   }
-  return `snapshots/${chatId}/${ts}.tar.gz`; // Legacy fallback
+  const ts = timestamp || new Date().toISOString().replace(/[:.]/g, "-");
+  return isGroup
+    ? `snapshots/groups/${chatId}/${ts}.tar.gz`
+    : `snapshots/${senderId}/${chatId}/${ts}.tar.gz`;
 }
 
 /**
  * Gets the R2 prefix for listing snapshots.
+ *
+ * @throws Error if senderId or isGroup is not provided (prevents isolation bypass)
  */
 export function getSnapshotPrefix(
   chatId: string,
   senderId?: string,
   isGroup?: boolean
 ): string {
-  if (senderId !== undefined && isGroup !== undefined) {
-    return isGroup
-      ? `snapshots/groups/${chatId}/`
-      : `snapshots/${senderId}/${chatId}/`;
+  if (senderId === undefined || isGroup === undefined) {
+    throw new Error(
+      `getSnapshotPrefix requires senderId and isGroup for chat ${chatId} (got senderId=${senderId}, isGroup=${isGroup})`
+    );
   }
-  return `snapshots/${chatId}/`; // Legacy fallback
+  return isGroup
+    ? `snapshots/groups/${chatId}/`
+    : `snapshots/${senderId}/${chatId}/`;
 }

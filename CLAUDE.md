@@ -33,6 +33,18 @@ curl -X POST http://localhost:8787/snapshot \
   -d '{"chatId":"test","senderId":"123","isGroup":false}'     # Create snapshot
 curl -H "X-API-Key: $ANDEE_API_KEY" \
   "http://localhost:8787/snapshots?chatId=test&senderId=123&isGroup=false"  # List
+
+# Test voice message (requires base64-encoded OGG/OPUS audio)
+base64 -i test.ogg > /tmp/audio.b64
+cat > /tmp/voice_request.json << EOF
+{"chatId":"999999999","senderId":"999999999","isGroup":false,
+ "audioBase64":"$(cat /tmp/audio.b64)","audioDurationSeconds":5,
+ "claudeSessionId":null,"botToken":"$BOT_TOKEN","userMessageId":1}
+EOF
+curl -X POST http://localhost:8787/ask \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d @/tmp/voice_request.json
 ```
 
 ## Architecture
@@ -67,6 +79,66 @@ Telegram bot powered by Claude Code Agent SDK with persistent server in Cloudfla
 ```
 
 **Message flow**: Bot sends `POST /ask` → Worker checks if persistent server running → If not, starts via `startProcess()` → POST message to internal HTTP server → Claude processes via streaming input → Responds directly to Telegram.
+
+**Voice message flow**:
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  VOICE MESSAGE FLOW                                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Voice Note ──► Telegram ──► Grammy Bot ──► Download OGG ──► Base64    │
+│                                                  │                      │
+│                                                  ▼                      │
+│                               POST /ask { audioBase64: "..." }          │
+│                                                  │                      │
+│                                                  ▼                      │
+│                         Workers AI (whisper-large-v3-turbo)             │
+│                              ~900ms, $0.0005/min                        │
+│                                                  │                      │
+│                                                  ▼                      │
+│                            Transcribed text ──► Claude                  │
+│                                                  │                      │
+│                                                  ▼                      │
+│                            Response ──► Telegram                        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Sandbox IDE
+
+Browser-based IDE for direct container access at https://andee-ide.pages.dev/
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SANDBOX IDE ARCHITECTURE                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Browser (andee-ide.pages.dev)                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  Sandbox Selector → File Tree → Monaco Editor → xterm.js Terminal│   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│       │                                                                 │
+│       │ WebSocket (port 8081)                                           │
+│       ▼                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  Container: ws-terminal.js (node-pty) → PTY → bash               │   │
+│  │  Enables: Claude Code TUI, vim, htop, full terminal emulation    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Commands:**
+```bash
+cd sandbox-ide && npm run dev      # Local dev (Vite on 5173)
+cd sandbox-ide && npm run deploy   # Deploy to Cloudflare Pages
+```
+
+**Key features:**
+- Full PTY support via node-pty (resize, isatty, job control)
+- Claude Code TUI works correctly
+- Browse any path (/workspace, /home/claude, etc.)
+- Monaco editor with syntax highlighting
 
 ## Critical Configuration
 
@@ -130,6 +202,68 @@ npm run deploy-code      # Code only (no secrets)
 openssl rand -hex 16 | sed 's/^/adk_/'
 ```
 
+## Test Users (Production Testing)
+
+Two dedicated test user IDs for testing without affecting real user data. These are treated **exactly like real users** - same code paths, same storage patterns. The only difference is recognizable IDs.
+
+| Constant | ID | Purpose |
+|----------|-----|---------|
+| TEST_USER_1 | 999999999 | Primary testing (nine 9s) |
+| TEST_USER_2 | 888888888 | Multi-user isolation testing (nine 8s) |
+| TEST_GROUP_CHAT | -100999999999 | Group chat testing |
+
+**Local testing (curl to sandbox-worker):**
+```bash
+# Send message as TEST_USER_1
+curl -X POST http://localhost:8787/ask \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"message":"Hello!","botToken":"$BOT_TOKEN","userMessageId":1}'
+
+# Reset TEST_USER_1's sandbox
+curl -X POST http://localhost:8787/reset \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'
+```
+
+**Production testing:**
+```bash
+# Sandbox worker (direct API access - requires API key)
+curl -X POST https://claude-sandbox-worker.samuel-hagman.workers.dev/ask \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"message":"Hello!","botToken":"'$BOT_TOKEN'","userMessageId":1}'
+
+# Telegram bot (webhook endpoint - simulates Telegram webhook)
+# Note: Telegram API calls are skipped for test users (see Transformer Behavior below)
+curl -X POST https://claude-telegram-bot.samuel-hagman.workers.dev/ \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":1,"message":{"message_id":1,"from":{"id":999999999,"first_name":"TestUser1","is_bot":false},"chat":{"id":999999999,"type":"private"},"date":1704650400,"text":"Hello!"}}'
+```
+
+**TypeScript import:**
+```typescript
+import { TEST_USER_1, TEST_USER_2, TEST_CHAT_1 } from '@andee/shared/constants';
+```
+
+### Transformer Behavior
+
+The telegram-bot includes a Grammy API transformer that **skips Telegram API calls** for test users. This means:
+
+- `setMessageReaction`, `sendMessage`, and other Telegram calls return mock success
+- No actual HTTP requests to Telegram API for test users
+- Clean logs without GrammyError noise
+
+**Expected logs for test user requests:**
+```
+[AUTH] User unknown (ID: 999999999) in chat 999999999 (type: private, isGroup: false)
+[999999999] Received: Hello from test!...
+[TEST] Skipping setMessageReaction for test chat 999999999
+```
+
+**Note:** The sandbox-worker still processes messages and attempts to send to Telegram (which fails silently). The transformer only affects the telegram-bot's Grammy API calls.
+
 ## R2 Storage Structure
 
 Sessions and snapshots are organized by Telegram user ID for data isolation:
@@ -173,8 +307,14 @@ Sessions and snapshots are organized by Telegram user ID for data isolation:
 | First message (cold start) | ~7s | Container + Claude CLI startup |
 | Subsequent messages (warm) | ~3.5s | Reuses persistent server, skips CLI startup |
 | After 1 hour idle | ~7s | Container slept, fresh start |
+| Voice transcription | ~900ms | Cloudflare Workers AI Whisper (adds to total) |
 
 **Container lifecycle**: `sleepAfter: "1h"` - container stays alive for 1 hour of inactivity, then sleeps. Next message triggers fresh start.
+
+On cold start:
+1. Restore from R2 snapshot (if exists)
+2. Read user timezone from `/home/claude/private/{senderId}/preferences.yaml`
+3. Start persistent server with `TZ={timezone}` env var (defaults to UTC)
 
 ## Gotchas
 
@@ -186,6 +326,10 @@ Sessions and snapshots are organized by Telegram user ID for data isolation:
 | Port 3000 already in use | `EADDRINUSE: address already in use :::3000` | Port 3000 is used by Cloudflare Sandbox infrastructure. Use port 8080 instead. |
 | Claude can't find config | Process fails silently | Set `HOME=/home/claude` via `env` option in `startProcess()` |
 | Container killed on deploy | `Runtime signalled the container to exit due to a new version rollout` | Transient - next message will spin up fresh container |
+| Memvid file not found | `memvid find` returns empty | File is created on first `memvid put`. Check if `.mv2` file exists first. |
+| Timezone not set | Reminders fire at wrong time | User must set timezone via "My timezone is X" or /timezone command |
+| node-pty build fails | `gyp ERR! build error` | Add build-essential + python3 to Dockerfile before `npm install -g node-pty` |
+| Terminal lines wrong position | Text at random positions | Ensure ws-terminal.js uses `pty.spawn()`, not `child_process.spawn()` |
 
 ## Skills System
 
@@ -197,7 +341,14 @@ Sessions and snapshots are organized by Telegram user ID for data isolation:
 └── developing-andee/
 
 /Andee/claude-sandbox-worker/.claude/skills/  ← FOR ANDEE (the bot) when
-└── weather/SKILL.md                             responding to Telegram users
+├── weather/SKILL.md                             responding to Telegram users
+├── searching-memories/SKILL.md                  (memvid conversation search)
+├── managing-artifacts/                          (artifact CRUD with yq)
+│   ├── SKILL.md
+│   ├── MENU_SCHEMA.md
+│   ├── scripts/*.sh
+│   └── templates/
+└── telegram-response/SKILL.md
 ```
 
 Andee IS a Claude Code-based bot. It has its own skills that get copied into its Docker container.
@@ -223,9 +374,107 @@ cd apps && npm run typecheck  # TypeScript validation
 cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 ```
 
+## Memory System
+
+Andee has persistent memory using Memvid for conversation history and flat markdown files for artifacts.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  MEMORY ARCHITECTURE                                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  /home/claude/                                                          │
+│  ├── shared/                      # Default for all users              │
+│  │   ├── shared.mv2               # Shared conversation memory (group)  │
+│  │   └── lists/                                                         │
+│  │       ├── MENU.JSON            # Schema + vocabulary registry        │
+│  │       ├── recipes/             # {name}-{uuid}.md files              │
+│  │       ├── movies/                                                    │
+│  │       └── grocery/                                                   │
+│  │                                                                      │
+│  └── private/{senderId}/          # Per-user private storage            │
+│      ├── memory.mv2               # Private conversation memory         │
+│      ├── preferences.yaml         # User preferences (timezone, etc.)   │
+│      └── lists/                                                         │
+│          ├── MENU.JSON                                                  │
+│          └── recipes/                                                   │
+│                                                                         │
+│  Memory Type:                                                           │
+│  • Group chat (isGroup=true) → /home/claude/shared/shared.mv2           │
+│  • Private chat → /home/claude/private/{senderId}/memory.mv2            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key components**:
+- **Memvid** (.mv2 files) - Hybrid search over conversation history
+- **Artifacts** - Markdown files with YAML frontmatter (recipes, lists, notes)
+- **MENU.JSON** - Schema and vocabulary registry for consistent tagging
+- **yq** - YAML processor for frontmatter queries
+
+See `ANDEE_MEMORY_TAD.md` for full architecture details.
+
+## Reminder & Proactive System
+
+Andee can set and deliver scheduled reminders via the SchedulerDO Durable Object.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  REMINDER SYSTEM                                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  User: "Remind me at 3pm to call mom"                                   │
+│         │                                                               │
+│         ▼                                                               │
+│  Container (Claude):                                                    │
+│  1. Get current time: date -u +%s                                       │
+│  2. Parse "at 3pm" → calculate Unix timestamp                           │
+│  3. Create reminder artifact in /home/claude/shared/lists/reminders/    │
+│  4. Call POST /schedule-reminder to worker                              │
+│         │                                                               │
+│         ▼                                                               │
+│  SchedulerDO (per user):                                                │
+│  • Stores reminder in SQLite                                            │
+│  • Sets DO alarm for trigger time                                       │
+│  • When alarm fires → sends directly to Telegram                        │
+│                                                                         │
+│  Hourly Cron:                                                           │
+│  • Placeholder for future proactive messaging                           │
+│  • Could wake containers for context-aware check-ins                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key files**:
+- `claude-sandbox-worker/src/scheduler/SchedulerDO.ts` - DO with SQLite + alarms
+- `claude-sandbox-worker/.claude/skills/reminders/SKILL.md` - Andee's reminder skill
+- `shared/types/reminder.ts` - Shared type definitions
+
+**Testing reminders**:
+```bash
+# Schedule a test reminder
+curl -X POST http://localhost:8787/schedule-reminder \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{
+    "senderId": "123456789",
+    "chatId": "123456789",
+    "isGroup": false,
+    "reminderId": "test-uuid-123",
+    "triggerAt": '"$(($(date +%s) * 1000 + 60000))"',
+    "message": "Test reminder",
+    "botToken": "'$BOT_TOKEN'"
+  }'
+
+# List reminders
+curl "http://localhost:8787/reminders?senderId=123456789" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+```
+
 ## Key Files
 
 - `claude-sandbox-worker/src/index.ts` - Worker endpoints, Sandbox SDK orchestration
+- `claude-sandbox-worker/src/handlers/ask.ts` - handleAsk() + transcribeAudio() for voice messages
 - `claude-sandbox-worker/src/scripts/` - Container scripts (imported as text via Wrangler `[[rules]]`)
   - `persistent-server.script.js` - HTTP server with streaming Claude input (main execution path)
   - `agent-telegram.script.js` - Fallback one-shot agent
@@ -238,6 +487,12 @@ cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 - `apps/src/weather/main.ts` - Weather component
 - `apps/vite.config.ts` - Vite multi-page app build configuration
 - `.claude/skills/` - Developer skills (for you when building Andee)
+- `sandbox-ide/` - Browser IDE for container access
+  - `src/components/Terminal.ts` - xterm.js WebSocket terminal
+  - `src/components/FileTree.ts` - File browser with navigation
+  - `src/components/Editor.ts` - Monaco editor wrapper
+- `claude-sandbox-worker/.claude/scripts/ws-terminal.js` - PTY terminal server (node-pty)
+- `claude-sandbox-worker/src/handlers/ide.ts` - IDE endpoint handlers
 
 ## Endpoints Reference
 
@@ -246,7 +501,7 @@ cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/` | GET | Health check |
-| `/ask` | POST | Fire-and-forget (persistent server, responds to Telegram) |
+| `/ask` | POST | Process message or voice (text via `message`, voice via `audioBase64`) |
 | `/logs?chatId=X` | GET | Read agent logs from container |
 | `/reset` | POST | Snapshot + destroy sandbox + delete R2 session |
 | `/session-update` | POST | Update session in R2 (called by agent) |
@@ -255,6 +510,19 @@ cd apps && npm run deploy     # Build + deploy to Cloudflare Pages
 | `/snapshot?chatId=X` | GET | Get latest snapshot (returns tar.gz) |
 | `/snapshots?chatId=X` | GET | List all snapshots for a chat |
 | `/snapshot?chatId=X&key=Y` | DELETE | Delete specific snapshot (key=all to delete all) |
+| `/schedule-reminder` | POST | Schedule a reminder via SchedulerDO |
+| `/cancel-reminder` | POST | Cancel a pending reminder |
+| `/complete-reminder` | POST | Mark reminder as completed |
+| `/reminders?senderId=X` | GET | List reminders for a user |
+
+### Sandbox IDE Endpoints (claude-sandbox-worker)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/sandboxes` | GET | List all R2 sessions with friendly names |
+| `/ws` | WS | WebSocket terminal (proxies to ws-terminal.js on port 8081) |
+| `/files` | GET | List directory contents |
+| `/file` | GET/PUT | Read/write file contents |
 
 ### claude-telegram-bot
 

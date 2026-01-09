@@ -1,0 +1,15 @@
+---
+uuid: ${UUID}
+type: ${ARTIFACT_TYPE}
+title: ${TITLE}
+created_at: ${TIMESTAMP}
+created_by: ${CREATED_BY}
+scope: ${SCOPE}
+tags: []
+status: active
+# Add type-specific fields below (cuisine, difficulty, etc.)
+---
+
+# ${TITLE}
+
+<!-- Write your content here -->

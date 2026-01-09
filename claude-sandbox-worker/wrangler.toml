@@ -9,16 +9,21 @@ compatibility_date = "2024-12-01"
 [dev]
 port = 8787
 
-# Durable Object binding for Sandbox
+# Durable Object bindings
 [durable_objects]
 bindings = [
-  { name = "Sandbox", class_name = "Sandbox" }
+  { name = "Sandbox", class_name = "Sandbox" },
+  { name = "Scheduler", class_name = "SchedulerDO" }
 ]
 
-# Migrations - Sandbox requires SQLite storage
+# Migrations - Sandbox and SchedulerDO require SQLite storage
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Sandbox"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SchedulerDO"]
 
 # Container configuration (wrangler 4.x format)
 # Instance types: lite (1/16 vCPU), basic (1/4), standard-1 (1/2),
@@ -49,3 +54,12 @@ bucket_name = "andee-snapshots"
 type = "Text"
 globs = ["**/*.script.js"]
 fallthrough = true
+
+# Cron trigger for hourly proactive checks
+# Runs at minute 0 of every hour to evaluate if Andee should send proactive messages
+[triggers]
+crons = ["0 * * * *"]
+
+# Workers AI binding for speech-to-text (voice message transcription)
+[ai]
+binding = "AI"

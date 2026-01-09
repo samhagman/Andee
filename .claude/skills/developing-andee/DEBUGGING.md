@@ -4,6 +4,7 @@ Troubleshooting and debugging Andee issues.
 
 ## Contents
 
+- [Sandbox IDE (Direct Container Access)](#sandbox-ide-direct-container-access)
 - [Real-time Log Tailing](#real-time-log-tailing)
 - [Agent Logs](#agent-logs)
 - [Log Event Reference](#log-event-reference)
@@ -16,6 +17,57 @@ Troubleshooting and debugging Andee issues.
 - [Verify Persistent Server](#verify-persistent-server)
 - [Common Issues & Solutions](#common-issues--solutions)
 - [Performance Timing Analysis](#performance-timing-analysis)
+
+---
+
+## Sandbox IDE (Direct Container Access)
+
+For interactive debugging, use the Sandbox IDE at https://andee-ide.pages.dev/
+
+### Features
+
+| Feature | Use Case |
+|---------|----------|
+| **Terminal** | Run commands interactively in the container |
+| **File browser** | Navigate any path (/workspace, /home/claude, etc.) |
+| **Editor** | View/edit files with Monaco (VS Code editor) |
+
+### Terminal Capabilities
+
+The terminal uses node-pty for full PTY support:
+- Run `claude` to test Claude Code TUI interactively
+- View logs: `cat /workspace/telegram_agent.log`
+- Test bash commands in the live container
+- Resize support, job control, colors
+
+### Use Cases
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  IDE DEBUGGING USE CASES                                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. Test skills interactively                                           │
+│     $ claude "test my weather skill"                                    │
+│                                                                         │
+│  2. Inspect memory files                                                │
+│     Browse to /home/claude/shared/lists/ in file tree                   │
+│                                                                         │
+│  3. Check persistent server state                                       │
+│     $ cat /workspace/telegram_agent.log | tail -50                      │
+│                                                                         │
+│  4. Debug memvid search                                                 │
+│     $ memvid find /home/claude/shared/shared.mv2 "query"                │
+│                                                                         │
+│  5. Verify YAML in artifacts                                            │
+│     $ yq '.tags' /home/claude/shared/lists/recipes/pasta-abc123.md      │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Terminal Server Location
+
+The terminal is served by `claude-sandbox-worker/.claude/scripts/ws-terminal.js` on port 8081. Uses node-pty for proper PTY emulation (required for Claude Code TUI to work).
 
 ---
 
@@ -91,6 +143,12 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 | `TELEGRAM_SENT` | Response sent to user |
 | `R2_SESSION_UPDATED` | Session persisted to R2 |
 | `AUTO_SNAPSHOT creating/created/error` | Auto-snapshot (55min idle) |
+| `[TEST] Skipping {method}` | Grammy API call skipped for test user (telegram-bot only) |
+| `[VOICE] Received voice message` | Audio data received from Telegram |
+| `[VOICE] Starting transcription` | Beginning Workers AI Whisper call |
+| `[VOICE] Whisper API returned in Xms` | Transcription timing complete |
+| `[VOICE] Transcription successful` | Text extracted from audio |
+| `[VOICE] Transcription failed` | Error during speech-to-text |
 
 ---
 
@@ -211,6 +269,30 @@ curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/ask" \
 
 # Check if persistent server is running (look for "Persistent server already running")
 # Send second message to same chatId and check wrangler tail logs
+```
+
+### Test User Log Behavior
+
+When testing with TEST_USER_1 (999999999) or TEST_USER_2 (888888888), the telegram-bot's Grammy transformer skips Telegram API calls:
+
+```bash
+# Send test webhook to telegram-bot (port 8788 locally, production URL for prod)
+curl -X POST http://localhost:8788/ \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":1,"message":{"message_id":1,"from":{"id":999999999,"first_name":"TestUser1","is_bot":false},"chat":{"id":999999999,"type":"private"},"date":1704650400,"text":"Hello test!"}}'
+
+# Expected logs (no GrammyError):
+# [AUTH] User unknown (ID: 999999999) in chat 999999999 (type: private, isGroup: false)
+# [999999999] Received: Hello test!...
+# [TEST] Skipping setMessageReaction for test chat 999999999
+```
+
+**Important:** For commands like `/start` to be recognized, include the `entities` field in your test payload:
+```json
+{
+  "text": "/start",
+  "entities": [{"type": "bot_command", "offset": 0, "length": 6}]
+}
 ```
 
 ---
@@ -369,6 +451,64 @@ grep "sleepAfter" claude-sandbox-worker/src/index.ts  # Should be "1h"
 1. Check Dockerfile syntax
 2. Verify npm packages are available
 3. Check `npm run dev` output for specific errors
+
+### Issue: Voice message returns empty transcription
+
+**Error:** `[VOICE] Transcription returned empty text`
+
+**Causes:**
+1. Audio too short (< 0.5s)
+2. Corrupted audio file
+3. Audio is silence or unintelligible
+
+**Solution:**
+1. Try a longer voice clip
+2. Check audio format is OGG/OPUS (Telegram's native format)
+3. Verify audio contains clear speech
+
+### Issue: Voice transcription timeout or error
+
+**Error:** `[VOICE] Transcription failed: ...` or Workers AI timeout
+
+**Causes:**
+1. Audio file too large (> 25MB limit)
+2. Workers AI service issue
+3. Invalid audio format
+
+**Solution:**
+1. Telegram voice notes are typically small (~200KB/min), so size shouldn't be an issue
+2. Check Cloudflare status page for Workers AI issues
+3. Ensure audio is proper OGG/OPUS format from Telegram
+
+### Issue: Voice message not detected
+
+**Cause:** Grammy handler not receiving voice message event.
+
+**Solution:**
+1. Check telegram-bot logs for `message:voice` handler
+2. Verify audio was sent as voice note (hold-to-record), not audio file attachment
+3. Audio file attachments are not yet supported (only voice notes)
+
+### Issue: Timezone not applied / Reminders at wrong time
+
+**Cause:** User hasn't set their timezone, or TZ isn't being read on cold start.
+
+**Verify timezone is set:**
+```bash
+# Check worker logs on cold start
+wrangler tail claude-sandbox-worker
+# Look for: "[Worker] User {id} timezone: America/Los_Angeles"
+
+# Check preferences file in container via IDE or curl
+# Browse to /home/claude/private/{senderId}/preferences.yaml
+```
+
+**Common issues:**
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| No timezone log on startup | No preferences.yaml | User needs to set timezone ("My timezone is X") |
+| TZ not updating mid-session | Expected behavior | TZ env var applies on next cold start only |
+| Reminders at wrong time | Wrong TZ string | Use IANA format (America/New_York, not EST) |
 
 ---
 

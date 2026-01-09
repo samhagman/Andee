@@ -2,7 +2,8 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createServer } from "http";
-import { appendFileSync, writeFileSync } from "fs";
+import { appendFileSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import { execSync } from "child_process";
 
 const PORT = 8080;
 const LOG_FILE = "/workspace/telegram_agent.log";
@@ -159,6 +160,76 @@ function log(msg) {
   appendFileSync(LOG_FILE, line + "\n");
 }
 
+// Append conversation turn to Memvid memory
+// See: https://docs.memvid.com/ for CLI reference
+// Note: memvid CLI requires content via --contextual <FILE>, not inline text
+function appendToMemvid(ctx, userMessage, assistantResponse) {
+  try {
+    // Determine memory file location
+    const memoryFile = ctx.isGroup
+      ? '/home/claude/shared/shared.mv2'
+      : `/home/claude/private/${ctx.senderId}/memory.mv2`;
+
+    // Ensure private directory exists if needed
+    if (!ctx.isGroup) {
+      const privateDir = `/home/claude/private/${ctx.senderId}`;
+      if (!existsSync(privateDir)) {
+        mkdirSync(privateDir, { recursive: true });
+        log(`MEMVID created private dir: ${privateDir}`);
+      }
+    }
+
+    // Create memory file if it doesn't exist
+    if (!existsSync(memoryFile)) {
+      try {
+        execSync(`memvid create "${memoryFile}"`, { timeout: 5000 });
+        log(`MEMVID created new memory file: ${memoryFile}`);
+      } catch (e) {
+        log(`MEMVID create failed: ${e.message}`);
+        return; // Can't continue without the file
+      }
+    }
+
+    const timestamp = new Date().toISOString();
+    const tempDir = '/tmp/memvid';
+
+    // Ensure temp directory exists
+    if (!existsSync(tempDir)) {
+      mkdirSync(tempDir, { recursive: true });
+    }
+
+    // Write user message to temp file and append using --input
+    const userTempFile = `${tempDir}/user_${Date.now()}.txt`;
+    try {
+      writeFileSync(userTempFile, userMessage);
+      execSync(`memvid put "${memoryFile}" --input "${userTempFile}" --title "user @ ${timestamp}" --label "conversation"`, { timeout: 5000 });
+      log("MEMVID appended user turn");
+    } catch (e) {
+      log(`MEMVID user append failed: ${e.message}`);
+    } finally {
+      // Clean up temp file
+      try { execSync(`rm -f "${userTempFile}"`); } catch {}
+    }
+
+    // Write assistant response to temp file and append using --input
+    const assistantTempFile = `${tempDir}/assistant_${Date.now()}.txt`;
+    try {
+      writeFileSync(assistantTempFile, assistantResponse);
+      execSync(`memvid put "${memoryFile}" --input "${assistantTempFile}" --title "assistant @ ${timestamp}" --label "conversation"`, { timeout: 5000 });
+      log("MEMVID appended assistant turn");
+    } catch (e) {
+      log(`MEMVID assistant append failed: ${e.message}`);
+    } finally {
+      // Clean up temp file
+      try { execSync(`rm -f "${assistantTempFile}"`); } catch {}
+    }
+
+  } catch (err) {
+    // Don't fail the whole flow if Memvid fails
+    log(`MEMVID error: ${err.message}`);
+  }
+}
+
 // Send typing indicator to Telegram
 async function sendTypingIndicator(botToken, chatId) {
   try {
@@ -309,6 +380,29 @@ async function* messageGenerator() {
     // Store context for response handling
     currentRequestContext = msg;
 
+    // Write context to PROTECTED file so skill scripts can read it
+    // Claude cannot access /tmp/protected/ directly (blocked by disallowedPaths)
+    // But skill scripts CAN read it since they execute in shell, not through Claude's tools
+    const contextDir = "/tmp/protected/telegram_context";
+    const contextFile = `${contextDir}/context.json`;
+    try {
+      mkdirSync(contextDir, { recursive: true });
+      const context = {
+        senderId: msg.senderId,
+        chatId: msg.chatId,
+        isGroup: msg.isGroup,
+        botToken: msg.botToken,
+        workerUrl: msg.workerUrl,
+        apiKey: msg.apiKey,
+        userMessageId: msg.userMessageId,
+        timestamp: new Date().toISOString()
+      };
+      writeFileSync(contextFile, JSON.stringify(context, null, 2));
+      log(`CONTEXT written to ${contextFile}`);
+    } catch (e) {
+      log(`CONTEXT write failed: ${e.message}`);
+    }
+
     // Start typing indicator immediately when we pick up a message
     if (!typingInterval) {
       const { botToken, chatId } = msg;
@@ -365,7 +459,7 @@ const server = createServer(async (req, res) => {
 
     try {
       const data = JSON.parse(body);
-      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup } = data;
+      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup, apiKey } = data;
 
       log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${text.substring(0, 30)}...`);
 
@@ -386,7 +480,7 @@ const server = createServer(async (req, res) => {
       }
 
       // Add to queue - the generator will pick it up
-      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup });
+      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup, apiKey });
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ queued: true, queueLength: messageQueue.length + 1 }));
@@ -517,6 +611,11 @@ async function main() {
             }
           }
 
+          // Append conversation to Memvid memory (async, non-blocking)
+          if (ctx.text && responseText) {
+            appendToMemvid(ctx, ctx.text, responseText);
+          }
+
           currentRequestContext = null;
         }
       }
@@ -524,11 +623,25 @@ async function main() {
   } catch (err) {
     log(`FATAL: ${err.message}`);
 
+    // Clear typing indicator to stop "typing..." from showing forever
+    if (typingInterval) {
+      clearInterval(typingInterval);
+      typingInterval = null;
+      log("CLEANUP cleared typing interval");
+    }
+
     // Try to notify user if we have context
     if (currentRequestContext) {
       const ctx = currentRequestContext;
-      await sendToTelegram(`Server error: ${err.message}`, ctx.botToken, ctx.chatId);
-      await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
+      try {
+        await sendToTelegram(`Server error: ${err.message}`, ctx.botToken, ctx.chatId);
+        await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
+      } catch (notifyErr) {
+        log(`CLEANUP notify failed: ${notifyErr.message}`);
+      }
+      // Clear context to prevent memory leak
+      currentRequestContext = null;
+      log("CLEANUP cleared request context");
     }
 
     process.exit(1);

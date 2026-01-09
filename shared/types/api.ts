@@ -10,12 +10,15 @@ export interface AskRequest {
 
 export interface AskTelegramRequest {
   chatId: string;
-  message: string;
+  message?: string; // Text message (optional if audio provided)
   claudeSessionId: string | null;
   botToken: string;
   userMessageId: number;
   senderId: string;
   isGroup: boolean;
+  // Voice message support
+  audioBase64?: string; // Base64-encoded OGG/OPUS audio
+  audioDurationSeconds?: number; // Duration for logging/metrics
 }
 
 export interface ResetRequest {

@@ -558,7 +558,7 @@ and saved a Thai Basil Chicken recipe.
 
 ## 10. `/implement-s` Slash Command for End-to-End Feature Development
 
-**STATUS: IMPLEMENTED** - See `.claude/skills/implement-s/SKILL.md`
+**STATUS: IMPLEMENTED** - See `.claude/commands/implement-s.md`
 
 **Goal**: Create a Claude Code skill that handles implementing new Andee features from start to finish, with all the right context, testing reminders, and links to relevant skills baked in.
 
@@ -788,7 +788,7 @@ const session = await claude.startSession({
 
 2. **Update deploying-andee skill** - Same instruction for deployment/testing commands
 
-3. **Update implement-s skill** - Remind to use env vars when testing
+3. **Update implement-s command** - Remind to use env vars when testing
 
 4. **Load .env in shell session** - Ensure `.env` file variables are exported when starting development:
    ```bash
@@ -815,7 +815,7 @@ curl -X POST http://localhost:8787/reset \
 **Implementation locations**:
 - `CLAUDE.md` - Update all curl examples to use `$ANDEE_API_KEY`
 - `.claude/skills/deploying-andee/SKILL.md` - Same
-- `.claude/skills/implement-s/SKILL.md` - Same
+- `.claude/commands/implement-s.md` - Same
 - Optional: Add `direnv` or shell hook to auto-load env vars
 
 ---
@@ -888,7 +888,7 @@ Plans should ALWAYS end with a documentation phase that updates everything touch
 │  - [ ] Update relevant .claude/skills/:                                 │
 │        • developing-andee - if implementation patterns changed          │
 │        • deploying-andee - if deployment/debugging changed              │
-│        • implement-s - if workflow itself improved                      │
+│        • implement-s command - if workflow itself improved              │
 │        • Any skill that references changed code                         │
 │                                                                         │
 │  - [ ] Update FUTURE_IDEAS.md:                                          │
@@ -907,11 +907,11 @@ Plans should ALWAYS end with a documentation phase that updates everything touch
 **Implementation Approach**:
 
 Update these skills to include this guidance:
-1. **`.claude/skills/implement-s/SKILL.md`** - Main place to add this (the implementation workflow)
+1. **`.claude/commands/implement-s.md`** - Main place to add this (the implementation workflow)
 2. **`.claude/skills/developing-andee/SKILL.md`** - Reinforce self-sufficient debugging
 3. **`CLAUDE.md`** - Add a "Planning Guidelines" section
 
-**Example additions to implement-s**:
+**Example additions to development workflow**:
 
 ```markdown
 ## Testing Philosophy
@@ -931,7 +931,7 @@ After e2e testing passes, update ALL relevant documentation:
 ```
 
 **Implementation locations**:
-- `.claude/skills/implement-s/SKILL.md` - Primary location
+- `.claude/commands/implement-s.md` - Primary location
 - `.claude/skills/developing-andee/DEBUGGING.md` - Reinforce self-sufficient debugging
 - `CLAUDE.md` - Optional "Planning Guidelines" section
 
@@ -1101,6 +1101,233 @@ const { data } = await response.json();
 - `apps/src/weather/index.html` - Update to fetch data instead of URL decode
 - `apps/src/*/index.html` - Same for all Mini Apps
 - `.claude/skills/developing-andee/IMPLEMENTATION.md` - Document new pattern
+
+---
+
+## 15. Secrets Isolation (.claudeignore + Wrapper Scripts)
+
+**Goal**: Prevent Claude Code from directly accessing sensitive data (API keys, tokens) while still allowing scripts and code to use them.
+
+**The Problem**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  CURRENT: Claude Code Has Full Secrets Access                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Claude Code can:                                                       │
+│  ├── Read .dev.vars directly             ← Sees ANDEE_API_KEY=adk_xxx  │
+│  ├── Run `cat claude-telegram-bot/.dev.vars`                           │
+│  ├── Run `env | grep KEY`                ← Sees loaded env vars        │
+│  └── Include secrets in curl commands    ← Exposed in logs/history     │
+│                                                                         │
+│  Even with Idea #12 (use $ANDEE_API_KEY instead of literals):          │
+│  ├── Claude Code could still READ the .dev.vars file                   │
+│  ├── Claude Code could run `printenv ANDEE_API_KEY`                    │
+│  └── Secrets are ONE command away from being exposed                   │
+│                                                                         │
+│  Risk: Screenshots, conversation logs, terminal history all could      │
+│        contain raw secret values if Claude Code ever outputs them      │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Proposed Solution**: Two-layer isolation using `.claudeignore` + wrapper scripts
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PROPOSED: Secrets Outside Project + Access Wrappers                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ~/.andee-secrets/                    ← OUTSIDE project directory      │
+│  ├── .env                             ← All secrets in one place       │
+│  │   BOT_TOKEN=7xxx:AAHxxx                                             │
+│  │   ANDEE_API_KEY=adk_xxx                                             │
+│  │   ANTHROPIC_API_KEY=sk-ant-xxx                                      │
+│  │                                                                      │
+│  └── README.md                        ← Setup instructions for humans  │
+│                                                                         │
+│  /Andee/.claudeignore                 ← Tells Claude Code what to skip │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  # Secrets - Claude Code must not read these                    │   │
+│  │  ~/.andee-secrets/                                              │   │
+│  │  **/.dev.vars                                                   │   │
+│  │  **/.prod.env                                                   │   │
+│  │  **/secrets/                                                    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  /Andee/scripts/                      ← Wrapper scripts Claude CAN use │
+│  ├── with-secrets.sh                  ← Loads secrets, runs command    │
+│  ├── authed-curl.sh                   ← curl with auth header injected │
+│  └── dev.sh                           ← Starts dev with secrets loaded │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**How It Works**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  FLOW: Claude Code Uses Wrappers, Never Sees Raw Secrets               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  BEFORE (Risky):                                                        │
+│                                                                         │
+│  Claude: curl -X POST http://localhost:8787/ask \                       │
+│            -H "X-API-Key: adk_8dfeed669475..." \    ← SECRET EXPOSED!  │
+│            -d '{"message":"test"}'                                      │
+│                                                                         │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  AFTER (Safe):                                                          │
+│                                                                         │
+│  Claude: ./scripts/authed-curl.sh POST /ask '{"message":"test"}'        │
+│                       │                         ↑                       │
+│                       │                    No secrets visible           │
+│                       ▼                                                 │
+│  authed-curl.sh:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  #!/bin/bash                                                    │   │
+│  │  source ~/.andee-secrets/.env   ← Loads secrets (Claude can't  │   │
+│  │                                    see this file)               │   │
+│  │  METHOD=$1                                                      │   │
+│  │  ENDPOINT=$2                                                    │   │
+│  │  DATA=$3                                                        │   │
+│  │                                                                 │   │
+│  │  curl -X "$METHOD" "http://localhost:8787$ENDPOINT" \           │   │
+│  │    -H "Content-Type: application/json" \                        │   │
+│  │    -H "X-API-Key: $ANDEE_API_KEY" \   ← Injected at runtime    │   │
+│  │    -d "$DATA"                                                   │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  Result: Claude Code calls the wrapper, secrets flow through,          │
+│          but never appear in Claude's context or output                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Components**:
+
+| Component | Purpose | Location |
+|-----------|---------|----------|
+| `.claudeignore` | Block Claude Code from reading secret files | `/Andee/.claudeignore` |
+| `~/.andee-secrets/.env` | Centralized secrets storage | Outside project |
+| `authed-curl.sh` | curl wrapper with auth injection | `/Andee/scripts/` |
+| `with-secrets.sh` | Generic wrapper: loads secrets, runs any command | `/Andee/scripts/` |
+| `dev.sh` | Start dev servers with secrets loaded | `/Andee/scripts/` |
+
+**Example Wrapper Scripts**:
+
+```bash
+# scripts/authed-curl.sh
+#!/bin/bash
+set -e
+source ~/.andee-secrets/.env
+
+METHOD="${1:-GET}"
+ENDPOINT="$2"
+DATA="$3"
+HOST="${ANDEE_HOST:-http://localhost:8787}"
+
+if [ -n "$DATA" ]; then
+  curl -s -X "$METHOD" "${HOST}${ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: $ANDEE_API_KEY" \
+    -d "$DATA"
+else
+  curl -s -X "$METHOD" "${HOST}${ENDPOINT}" \
+    -H "X-API-Key: $ANDEE_API_KEY"
+fi
+```
+
+```bash
+# scripts/with-secrets.sh
+#!/bin/bash
+# Run any command with secrets loaded in environment
+set -e
+source ~/.andee-secrets/.env
+exec "$@"
+```
+
+```bash
+# scripts/dev.sh
+#!/bin/bash
+# Start development with secrets automatically loaded
+source ~/.andee-secrets/.env
+cd claude-sandbox-worker && npm run dev
+```
+
+**Usage Examples** (what Claude Code would run):
+
+```bash
+# Test an endpoint (safe - no secrets in command)
+./scripts/authed-curl.sh POST /ask '{"chatId":"test","message":"Hello"}'
+
+# Run any command with secrets loaded
+./scripts/with-secrets.sh wrangler dev
+
+# Start development
+./scripts/dev.sh
+
+# Check health (no auth needed, works directly)
+curl http://localhost:8787/
+```
+
+**Wrangler Integration**:
+
+```bash
+# Option A: Symlink .dev.vars to secrets location
+ln -s ~/.andee-secrets/.env claude-sandbox-worker/.dev.vars
+
+# Option B: Wrapper script for wrangler
+# scripts/wrangler.sh
+#!/bin/bash
+source ~/.andee-secrets/.env
+exec wrangler "$@"
+```
+
+**Fish Shell Compatibility** (user's shell):
+
+```fish
+# ~/.config/fish/conf.d/andee-secrets.fish
+# Note: Wrapper scripts use bash, so this is optional for direct fish use
+if test -f ~/.andee-secrets/.env
+    export (cat ~/.andee-secrets/.env | grep -v '^#' | xargs)
+end
+```
+
+**Security Boundaries**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WHAT CLAUDE CODE CAN DO          │  WHAT CLAUDE CODE CANNOT DO        │
+├───────────────────────────────────┼─────────────────────────────────────┤
+│  ✅ Call ./scripts/authed-curl.sh │  ❌ Read ~/.andee-secrets/.env      │
+│  ✅ Call ./scripts/with-secrets.sh│  ❌ Read .dev.vars (in .claudeignore)│
+│  ✅ See that wrappers exist       │  ❌ Run `printenv ANDEE_API_KEY`    │
+│  ✅ Read wrapper script SOURCE    │  ❌ See secrets in curl output      │
+│  ✅ Know secrets are "somewhere"  │  ❌ Copy/paste/expose secret values │
+└───────────────────────────────────┴─────────────────────────────────────┘
+```
+
+**Migration Plan**:
+
+1. Create `~/.andee-secrets/` directory and `.env` file
+2. Move secrets from `.dev.vars` files to `~/.andee-secrets/.env`
+3. Add `.claudeignore` to project root
+4. Create wrapper scripts in `/Andee/scripts/`
+5. Update CLAUDE.md to use wrapper scripts in examples
+6. Symlink `.dev.vars` → `~/.andee-secrets/.env` for wrangler compatibility
+7. Test that wrangler dev still works
+8. Test that Claude Code cannot read the secrets directory
+
+**Implementation Locations**:
+- `.claudeignore` - Project root
+- `~/.andee-secrets/` - User home directory (outside project)
+- `scripts/authed-curl.sh` - New file
+- `scripts/with-secrets.sh` - New file
+- `scripts/dev.sh` - New file
+- `CLAUDE.md` - Update curl examples to use wrappers
 
 ---
 

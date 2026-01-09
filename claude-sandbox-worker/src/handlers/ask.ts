@@ -98,21 +98,124 @@ async function restoreFromSnapshot(
   }
 }
 
+/**
+ * Transcribe audio using Cloudflare Workers AI (Whisper).
+ * Returns the transcribed text or an error.
+ */
+async function transcribeAudio(
+  ai: Ai,
+  audioBase64: string,
+  chatId: string
+): Promise<{ text: string; error?: string }> {
+  const startTime = Date.now();
+  console.log(`[${chatId}] [VOICE] Starting transcription, audio size: ${audioBase64.length} base64 chars (~${Math.round(audioBase64.length * 0.75 / 1024)} KB)`);
+
+  try {
+    // Workers AI Whisper expects audio as base64 string directly
+    const result = await ai.run("@cf/openai/whisper-large-v3-turbo", {
+      audio: audioBase64,
+    });
+
+    const elapsed = Date.now() - startTime;
+    console.log(`[${chatId}] [VOICE] Whisper API returned in ${elapsed}ms, result keys: ${Object.keys(result || {}).join(", ")}`);
+
+    // Handle response - Whisper returns { text: string } or { vtt: string }
+    const transcribedText = (result as { text?: string }).text;
+
+    if (!transcribedText || transcribedText.trim() === "") {
+      console.log(`[${chatId}] [VOICE] Transcription returned empty text, full result: ${JSON.stringify(result)}`);
+      return { text: "", error: "Transcription returned empty text" };
+    }
+
+    console.log(`[${chatId}] [VOICE] Transcription successful: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? "..." : ""}"`);
+    return { text: transcribedText.trim() };
+  } catch (error) {
+    const elapsed = Date.now() - startTime;
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error(`[${chatId}] [VOICE] Transcription failed after ${elapsed}ms: ${message}`);
+    if (error instanceof Error && error.stack) {
+      console.error(`[${chatId}] [VOICE] Stack trace: ${error.stack}`);
+    }
+    return { text: "", error: message };
+  }
+}
+
 export async function handleAsk(
   ctx: HandlerContext
 ): Promise<Response> {
   try {
     const body = (await ctx.request.json()) as AskTelegramRequest;
-    const { chatId, message, claudeSessionId, botToken, userMessageId, senderId, isGroup } = body;
+    const {
+      chatId,
+      message,
+      claudeSessionId,
+      botToken,
+      userMessageId,
+      senderId,
+      isGroup,
+      audioBase64,
+      audioDurationSeconds,
+    } = body;
 
-    if (!chatId || !message || !botToken) {
+    // Validate required fields
+    if (!chatId || !botToken) {
       return Response.json(
-        { error: "Missing required fields" },
+        { error: "Missing required fields (chatId, botToken)" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
 
-    console.log(`[Worker] Processing message for chat ${chatId} (senderId: ${senderId}, isGroup: ${isGroup})`);
+    // Validate: need either message OR audioBase64, not both, not neither
+    if (!message && !audioBase64) {
+      return Response.json(
+        { error: "Must provide either message or audioBase64" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    if (message && audioBase64) {
+      return Response.json(
+        { error: "Cannot provide both message and audioBase64" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Handle voice message transcription
+    let finalMessage = message;
+    if (audioBase64) {
+      console.log(
+        `[${chatId}] [VOICE] Received voice message: duration=${audioDurationSeconds || "?"}s, base64_length=${audioBase64.length}`
+      );
+
+      const { text, error } = await transcribeAudio(ctx.env.AI, audioBase64, chatId);
+
+      if (error || !text) {
+        console.error(`[${chatId}] [VOICE] Transcription failed, sending error to user: ${error}`);
+        // Send error to Telegram and return
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `Sorry, I couldn't understand that voice message. ${error || "Please try again."}`,
+            reply_to_message_id: userMessageId,
+          }),
+        }).catch(() => {});
+
+        return Response.json(
+          { error: "Transcription failed", details: error },
+          { status: 422, headers: CORS_HEADERS }
+        );
+      }
+
+      finalMessage = text;
+      console.log(
+        `[${chatId}] [VOICE] Transcription complete, passing to Claude: "${text.substring(0, 80)}${text.length > 80 ? "..." : ""}"`
+      );
+    }
+
+    const inputType = audioBase64 ? "voice" : "text";
+    console.log(`[${chatId}] Processing ${inputType} message (senderId: ${senderId}, isGroup: ${isGroup})`);
 
     // Get sandbox with configurable sleep timeout
     const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
@@ -126,8 +229,13 @@ export async function handleAsk(
       body: JSON.stringify({ chat_id: chatId, action: "typing" }),
     }).catch(() => {});
 
-    const workerUrl =
-      "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+    // Service bindings use "internal" hostname which isn't resolvable from containers
+    // Use production URL when hostname is "internal", otherwise derive from request
+    const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+    const requestUrl = new URL(ctx.request.url);
+    const workerUrl = requestUrl.host === "internal"
+      ? PRODUCTION_WORKER_URL
+      : `${requestUrl.protocol}//${requestUrl.host}`;
 
     // Check if persistent server is running
     const processes = await sandbox.listProcesses();
@@ -142,6 +250,24 @@ export async function handleAsk(
       const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
       if (restored) {
         console.log(`[Worker] Filesystem restored from snapshot for chat ${chatId}`);
+      }
+
+      // Read user timezone from preferences (if they exist)
+      let userTimezone = "UTC";
+      if (senderId) {
+        const prefsPath = `/home/claude/private/${senderId}/preferences.yaml`;
+        const prefsResult = await sandbox.exec(
+          `cat ${prefsPath} 2>/dev/null || echo ""`,
+          { timeout: QUICK_COMMAND_TIMEOUT_MS }
+        );
+
+        if (prefsResult.stdout.includes("timezone:")) {
+          const match = prefsResult.stdout.match(/timezone:\s*([^\n]+)/);
+          if (match) {
+            userTimezone = match[1].trim();
+            console.log(`[Worker] User ${senderId} timezone: ${userTimezone}`);
+          }
+        }
       }
 
       // Write the persistent server script
@@ -162,6 +288,7 @@ export async function handleAsk(
           env: {
             ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY,
             HOME: "/home/claude",
+            TZ: userTimezone,
           },
         }
       );
@@ -184,7 +311,7 @@ export async function handleAsk(
     // POST message to the internal server using exec + curl
     // This is the reliable way to communicate with the internal server
     const messagePayload = JSON.stringify({
-      text: message,
+      text: finalMessage,
       botToken,
       chatId,
       userMessageId,
@@ -192,6 +319,7 @@ export async function handleAsk(
       claudeSessionId,
       senderId,
       isGroup,
+      apiKey: ctx.env.ANDEE_API_KEY,
     });
 
     // Escape the payload for shell
@@ -214,7 +342,7 @@ export async function handleAsk(
       await sandbox.writeFile(
         "/workspace/input.json",
         JSON.stringify({
-          message,
+          message: finalMessage,
           claudeSessionId,
           botToken,
           chatId,
@@ -222,6 +350,7 @@ export async function handleAsk(
           workerUrl,
           senderId,
           isGroup,
+          apiKey: ctx.env.ANDEE_API_KEY,
         })
       );
 

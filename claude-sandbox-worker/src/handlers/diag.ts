@@ -86,6 +86,24 @@ test();
       { timeout: 120000 }
     );
 
+    // Test ws module loading
+    const wsModuleTest = await sandbox.exec(
+      `NODE_PATH=/usr/local/lib/node_modules node -e "console.log('ws version:', require('ws').WebSocketServer ? 'OK' : 'FAIL')" 2>&1 || echo "Exit: $?"`,
+      { timeout: 10000 }
+    );
+
+    // Test ws-terminal.js script directly
+    const wsTerminalTest = await sandbox.exec(
+      `ls -la /home/claude/.claude/scripts/ws-terminal.js 2>&1 && cat /home/claude/.claude/scripts/ws-terminal.js | head -20`,
+      { timeout: 10000 }
+    );
+
+    // Try running ws-terminal with NODE_PATH and capture errors
+    const wsTerminalRun = await sandbox.exec(
+      `timeout 2 bash -c 'NODE_PATH=/usr/local/lib/node_modules node /home/claude/.claude/scripts/ws-terminal.js 2>&1' || echo "Exit code: $?"`,
+      { timeout: 10000 }
+    );
+
     return Response.json(
       {
         env: {
@@ -122,6 +140,21 @@ test();
           exitCode: sdkResult.exitCode,
           stdout: sdkResult.stdout,
           stderr: sdkResult.stderr,
+        },
+        wsModuleTest: {
+          exitCode: wsModuleTest.exitCode,
+          stdout: wsModuleTest.stdout,
+          stderr: wsModuleTest.stderr,
+        },
+        wsTerminalTest: {
+          exitCode: wsTerminalTest.exitCode,
+          stdout: wsTerminalTest.stdout,
+          stderr: wsTerminalTest.stderr,
+        },
+        wsTerminalRun: {
+          exitCode: wsTerminalRun.exitCode,
+          stdout: wsTerminalRun.stdout,
+          stderr: wsTerminalRun.stderr,
         },
       },
       { headers: CORS_HEADERS }

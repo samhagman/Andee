@@ -14,3 +14,18 @@ export {
   handleSnapshotsList,
   handleSnapshotDelete,
 } from "./snapshot";
+export {
+  handleScheduleReminder,
+  handleCancelReminder,
+  handleCompleteReminder,
+  handleListReminders,
+} from "./reminder";
+export {
+  handleSandboxes,
+  handleFiles,
+  handleFileRead,
+  handleFileWrite,
+  handleTerminal,
+  handleTerminalUrl,
+  handleWsContainerTest,
+} from "./ide";

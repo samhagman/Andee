@@ -300,11 +300,32 @@ Previously scripts were embedded as template literal strings (no syntax highligh
 ### Script Files
 
 ```
-claude-sandbox-worker/src/scripts/
-├── persistent-server.script.js   # Main HTTP server (streaming input mode)
-├── agent-telegram.script.js      # Fallback one-shot agent
-├── scripts.d.ts                  # TypeScript: declare module '*.script.js'
-└── index.ts                      # Re-exports scripts as strings
+claude-sandbox-worker/src/scripts/           # Wrangler-imported scripts (.script.js)
+├── persistent-server.script.js              # Main HTTP server (streaming input mode)
+├── agent-telegram.script.js                 # Fallback one-shot agent
+├── scripts.d.ts                             # TypeScript: declare module '*.script.js'
+└── index.ts                                 # Re-exports scripts as strings
+
+claude-sandbox-worker/.claude/scripts/       # Container-resident scripts (copied by Dockerfile)
+└── ws-terminal.js                           # WebSocket terminal with PTY (port 8081)
+```
+
+### Terminal Script Details
+
+The `ws-terminal.js` script provides the WebSocket terminal for the Sandbox IDE:
+
+| Feature | Implementation |
+|---------|----------------|
+| PTY support | node-pty (not child_process.spawn) |
+| Port | 8081 |
+| Protocol | ttyd-compatible ('0' = I/O, '1' = resize JSON) |
+| Resize | `shell.resize(cols, rows)` works correctly |
+| Claude Code TUI | Works (isatty() returns true) |
+
+**Dependencies in Dockerfile:**
+```dockerfile
+RUN apt-get update && apt-get install -y build-essential python3  # For node-pty compilation
+RUN npm install -g ws node-pty
 ```
 
 ### How It Works
