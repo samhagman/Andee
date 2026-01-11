@@ -21,20 +21,31 @@ Use this skill when the user asks about past conversations or needs context from
 /home/claude/private/{senderId}/memory.mv2  # Private conversations (per user)
 ```
 
-**Context comes from environment**:
-- `SENDER_ID` - Telegram user ID (numeric)
-- `IS_GROUP` - Whether this is a group chat
+## Getting Context
+
+The sender ID and chat type are available in the context file. Read them with:
+
+```bash
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+```
+
+**Always read context first** before searching private memory.
 
 ## Memvid CLI Commands
 
 ### Search Conversation Memory
 
 ```bash
+# First, get context
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+
 # Search shared memory (for group chats or general recall)
 memvid find /home/claude/shared/shared.mv2 --query "pasta recipe" --mode hybrid
 
 # Search user's private memory
-memvid find /home/claude/private/${SENDER_ID}/memory.mv2 --query "secret recipe" --mode hybrid
+memvid find /home/claude/private/$SENDER_ID/memory.mv2 --query "secret recipe" --mode hybrid
 ```
 
 ### Search Modes
@@ -53,10 +64,14 @@ memvid find <memory_file.mv2> --query "<search_query>" [--mode lex|sem|hybrid]
 
 ## Search Strategy
 
-1. **Determine context**: Is this a group chat (`IS_GROUP=true`) or private?
+1. **Read context first**:
+   ```bash
+   SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+   IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+   ```
 2. **Choose memory file**:
-   - Group chat → `/home/claude/shared/shared.mv2`
-   - Private chat → `/home/claude/private/${SENDER_ID}/memory.mv2`
+   - Group chat (`IS_GROUP=true`) → `/home/claude/shared/shared.mv2`
+   - Private chat → `/home/claude/private/$SENDER_ID/memory.mv2`
 3. **Start with hybrid mode** for best recall
 4. **If no results**, try:
    - Different keywords
@@ -66,11 +81,14 @@ memvid find <memory_file.mv2> --query "<search_query>" [--mode lex|sem|hybrid]
 ## Example Usage
 
 ```bash
+# First, always get context
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+
 # User asks: "What was that Italian recipe we discussed?"
 memvid find /home/claude/shared/shared.mv2 --query "Italian recipe" --mode hybrid
 
 # User asks: "Remember my secret family recipe?"
-memvid find /home/claude/private/${SENDER_ID}/memory.mv2 --query "secret family recipe" --mode hybrid
+memvid find /home/claude/private/$SENDER_ID/memory.mv2 --query "secret family recipe" --mode hybrid
 
 # User asks: "Find conversations about the budget"
 memvid find /home/claude/shared/shared.mv2 --query "budget" --mode lex

@@ -149,6 +149,13 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 | `[VOICE] Whisper API returned in Xms` | Transcription timing complete |
 | `[VOICE] Transcription successful` | Text extracted from audio |
 | `[VOICE] Transcription failed` | Error during speech-to-text |
+| `[SchedulerDO] Alarm fired` | DO alarm triggered for reminder delivery |
+| `[SchedulerDO] Processing N due reminders` | Number of reminders being processed |
+| `[SchedulerDO] Sent reminder X` | Reminder message delivered to Telegram |
+| `[SchedulerDO] Pinned message X in chat Y` | Reminder auto-pinned successfully |
+| `[SchedulerDO] Failed to pin message X` | Pin failed (bot not admin in group) |
+| `[SchedulerDO] Sent pin failure notification` | One-time tip sent about admin perms |
+| `[SchedulerDO] Alarm set for X` | Next alarm scheduled |
 
 ---
 
@@ -322,17 +329,28 @@ curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"test","botToken":
 
 ### Issue: "Claude Code process exited with code 1"
 
-**Cause:** Orphaned session ID in R2. The R2 session has a claudeSessionId that doesn't exist in the container (e.g., after sandbox reset).
+**Cause:** Claude Code CLI process exited unexpectedly. This can happen due to:
+- Orphaned session ID in R2 (session doesn't exist in new container)
+- Permission issues (HOME env var not set correctly)
+- Transient errors during startup
 
-**Solution:**
+**Automatic Recovery:** As of 2026-01-11, the persistent server automatically:
+1. Detects "exited with code 1" errors
+2. Clears any stale session ID
+3. Retries once with fresh state
+4. Only fails permanently if retry also fails
+
+**Manual Solution (if auto-recovery fails):**
 ```bash
-# Delete the R2 session
-npx wrangler r2 object delete andee-sessions/sessions/CHAT_ID.json --remote
-
-# Or reset the sandbox (which now also deletes R2 session)
+# Reset the sandbox (clears container + R2 session)
 curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/reset" \
   -H "Content-Type: application/json" \
-  -d '{"chatId":"CHAT_ID"}'
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"CHAT_ID","senderId":"SENDER_ID","isGroup":false}'
+
+# Check logs for details
+curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHAT_ID" \
+  -H "X-API-Key: $ANDEE_API_KEY" | jq -r '.log'
 ```
 
 ### Issue: Eye emoji reaction but no response

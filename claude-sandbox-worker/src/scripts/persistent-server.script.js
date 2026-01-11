@@ -7,6 +7,16 @@ import { execSync } from "child_process";
 
 const PORT = 8080;
 const LOG_FILE = "/workspace/telegram_agent.log";
+const PERSONALITY_PATH = "/home/claude/.claude/PERSONALITY.md";
+
+// Load personality prompt at startup (appended to system prompt)
+let personalityPrompt = "";
+try {
+  personalityPrompt = readFileSync(PERSONALITY_PATH, "utf-8");
+  console.error(`[STARTUP] Loaded personality from ${PERSONALITY_PATH} (${personalityPrompt.length} chars)`);
+} catch (e) {
+  console.error(`[STARTUP] No personality file at ${PERSONALITY_PATH}, using defaults`);
+}
 
 // Escape text for Telegram MarkdownV2 format
 // Converts Claude's natural markdown to Telegram-compatible MarkdownV2
@@ -149,6 +159,7 @@ let lastKnownWorkerUrl = null;
 let lastKnownChatId = null;
 let lastKnownSenderId = null;
 let lastKnownIsGroup = null;
+let lastKnownApiKey = null;
 const AUTO_SNAPSHOT_AFTER_MS = 55 * 60 * 1000; // 55 minutes
 const SNAPSHOT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 
@@ -346,9 +357,11 @@ async function createAutoSnapshot() {
     const tarData = readFileSync(snapshotPath);
 
     // Upload to worker via POST /snapshot
+    const headers = { "Content-Type": "application/json" };
+    if (lastKnownApiKey) headers["X-API-Key"] = lastKnownApiKey;
     const response = await fetch(`${lastKnownWorkerUrl}/snapshot`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         chatId: lastKnownChatId,
         senderId: lastKnownSenderId,
@@ -375,7 +388,11 @@ async function* messageGenerator() {
   while (true) {
     log("GENERATOR waiting for message...");
     const msg = await waitForNextMessage();
-    log(`GENERATOR yielding message: ${msg.text.substring(0, 50)}...`);
+
+    const hasImages = msg.images && msg.images.length > 0;
+    const textPreview = msg.text ? msg.text.substring(0, 50) + "..." : "[no text]";
+    const imageInfo = hasImages ? ` +${msg.images.length} image(s)` : "";
+    log(`GENERATOR yielding message: ${textPreview}${imageInfo}`);
 
     // Store context for response handling
     currentRequestContext = msg;
@@ -412,11 +429,43 @@ async function* messageGenerator() {
       }, 4000);
     }
 
+    // Build content for Claude
+    // If images present, use content array format for multimodal
+    // Otherwise, use simple string for backward compatibility
+    let content;
+
+    if (hasImages) {
+      content = [];
+
+      // Add text first if present
+      if (msg.text) {
+        content.push({ type: "text", text: msg.text });
+      }
+
+      // Add images
+      for (const img of msg.images) {
+        content.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: img.mediaType,
+            data: img.base64,
+          },
+        });
+      }
+
+      log(`YIELD multimodal: ${msg.text ? "text + " : ""}${msg.images.length} image(s)`);
+    } else {
+      // Text-only message - use simple string
+      content = msg.text;
+      log(`YIELD text: ${textPreview}`);
+    }
+
     yield {
       type: "user",
       message: {
         role: "user",
-        content: msg.text
+        content
       }
     };
   }
@@ -459,15 +508,21 @@ const server = createServer(async (req, res) => {
 
     try {
       const data = JSON.parse(body);
-      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup, apiKey } = data;
+      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup, apiKey, images, mediaGroupId } = data;
 
-      log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${text.substring(0, 30)}...`);
+      const hasImages = images && images.length > 0;
+      const textPreview = text ? text.substring(0, 30) + "..." : "[no text]";
+      const imageInfo = hasImages ? ` +${images.length} image(s)` : "";
+      const albumInfo = mediaGroupId ? ` (album: ${mediaGroupId})` : "";
+
+      log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${textPreview}${imageInfo}${albumInfo}`);
 
       // Track context for auto-snapshot and session updates
       lastKnownWorkerUrl = workerUrl;
       lastKnownChatId = chatId;
       lastKnownSenderId = senderId;
       lastKnownIsGroup = isGroup;
+      lastKnownApiKey = apiKey;
 
       // Reset activity tracking on new message
       lastActivityTime = Date.now();
@@ -480,7 +535,8 @@ const server = createServer(async (req, res) => {
       }
 
       // Add to queue - the generator will pick it up
-      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup, apiKey });
+      // Note: Album buffering now happens at the telegram-bot level, so images arrive as a single batch
+      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup, apiKey, images });
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ queued: true, queueLength: messageQueue.length + 1 }));
@@ -495,6 +551,135 @@ const server = createServer(async (req, res) => {
   res.writeHead(404);
   res.end("Not found");
 });
+
+/**
+ * Run the Claude query loop.
+ * @param {string|undefined} resumeSessionId - Session ID to resume, or undefined for fresh start
+ * @returns {Promise<void>}
+ */
+async function runQueryLoop(resumeSessionId) {
+  log(`CLAUDE starting query loop (resume=${resumeSessionId || "none"})...`);
+
+  // Build query options
+  const queryOptions = {
+    resume: resumeSessionId,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    allowedTools: [
+      "Read", "Write", "Edit",
+      "Bash",
+      "Glob", "Grep",
+      "WebSearch", "WebFetch",
+      "Task",
+      "Skill"
+    ],
+    settingSources: ["user"],
+    cwd: "/workspace/files",
+    model: "claude-sonnet-4-5",
+    maxTurns: 25
+  };
+
+  // Add personality prompt if loaded
+  if (personalityPrompt) {
+    queryOptions.systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: personalityPrompt
+    };
+    log(`PERSONALITY appended (${personalityPrompt.length} chars)`);
+  }
+
+  for await (const msg of query({
+    prompt: messageGenerator(),
+    options: queryOptions
+  })) {
+    // Capture session ID
+    if (msg.type === "system" && msg.subtype === "init") {
+      sessionId = msg.session_id;
+      log(`SESSION id=${sessionId}`);
+    }
+
+    // Log tool usage
+    if (msg.type === "assistant" && msg.message?.content) {
+      isProcessing = true;
+      for (const block of msg.message.content) {
+        if (block.type === "tool_use") {
+          log(`TOOL_START name=${block.name}`);
+        }
+      }
+    }
+
+    if (msg.type === "user" && msg.message?.content) {
+      for (const block of msg.message.content) {
+        if (block.type === "tool_result") {
+          log(`TOOL_END id=${block.tool_use_id}`);
+        }
+      }
+    }
+
+    // Handle result - send to Telegram
+    if (msg.type === "result") {
+      isProcessing = false;
+
+      // Clear typing interval
+      if (typingInterval) {
+        clearInterval(typingInterval);
+        typingInterval = null;
+      }
+
+      const ctx = currentRequestContext;
+
+      if (ctx) {
+        const responseText = msg.subtype === "success"
+          ? msg.result
+          : `Error: ${msg.subtype}${msg.errors ? "\n" + msg.errors.join("\n") : ""}`;
+
+        log(`COMPLETE cost=$${msg.total_cost_usd?.toFixed(4)} chars=${responseText.length}`);
+
+        // Send to Telegram
+        await sendToTelegram(responseText, ctx.botToken, ctx.chatId);
+        log("TELEGRAM_SENT");
+
+        // Remove reaction
+        await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
+
+        // Update R2 session
+        if (sessionId && ctx.workerUrl) {
+          try {
+            const headers = { "Content-Type": "application/json" };
+            if (ctx.apiKey) headers["X-API-Key"] = ctx.apiKey;
+            await fetch(`${ctx.workerUrl}/session-update`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                chatId: ctx.chatId,
+                claudeSessionId: sessionId,
+                senderId: ctx.senderId,
+                isGroup: ctx.isGroup
+              })
+            });
+            log("R2_SESSION_UPDATED");
+          } catch (e) {
+            log(`R2_SESSION_FAILED: ${e.message}`);
+          }
+        }
+
+        // Append conversation to Memvid memory (async, non-blocking)
+        // Include image info in the logged message if present
+        const hasImages = ctx.images && ctx.images.length > 0;
+        const userMessageForLog = hasImages
+          ? `[${ctx.images.length} image(s) attached]\n${ctx.text || ""}`
+          : ctx.text;
+
+        if (userMessageForLog && responseText) {
+          appendToMemvid(ctx, userMessageForLog, responseText);
+        }
+
+        currentRequestContext = null;
+      }
+    }
+  }
+}
 
 // Main: Start server and Claude query loop
 async function main() {
@@ -519,133 +704,98 @@ async function main() {
   }, SNAPSHOT_CHECK_INTERVAL_MS);
 
   log("AUTO_SNAPSHOT timer started (check every 5 min, trigger at 55 min idle)");
-  log("CLAUDE starting query loop with streaming input...");
+
+  // Track retry state
+  let hasRetried = false;
 
   try {
-    for await (const msg of query({
-      prompt: messageGenerator(),
-      options: {
-        resume: sessionId || undefined,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        allowedTools: [
-          "Read", "Write", "Edit",
-          "Bash",
-          "Glob", "Grep",
-          "WebSearch", "WebFetch",
-          "Task",
-          "Skill"
-        ],
-        settingSources: ["user"],
-        cwd: "/workspace/files",
-        model: "claude-sonnet-4-5",
-        maxTurns: 25
-      }
-    })) {
-      // Capture session ID
-      if (msg.type === "system" && msg.subtype === "init") {
-        sessionId = msg.session_id;
-        log(`SESSION id=${sessionId}`);
-      }
-
-      // Log tool usage
-      if (msg.type === "assistant" && msg.message?.content) {
-        isProcessing = true;
-        for (const block of msg.message.content) {
-          if (block.type === "tool_use") {
-            log(`TOOL_START name=${block.name}`);
-          }
-        }
-      }
-
-      if (msg.type === "user" && msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === "tool_result") {
-            log(`TOOL_END id=${block.tool_use_id}`);
-          }
-        }
-      }
-
-      // Handle result - send to Telegram
-      if (msg.type === "result") {
-        isProcessing = false;
-
-        // Clear typing interval
-        if (typingInterval) {
-          clearInterval(typingInterval);
-          typingInterval = null;
-        }
-
-        const ctx = currentRequestContext;
-
-        if (ctx) {
-          const responseText = msg.subtype === "success"
-            ? msg.result
-            : `Error: ${msg.subtype}${msg.errors ? "\n" + msg.errors.join("\n") : ""}`;
-
-          log(`COMPLETE cost=$${msg.total_cost_usd?.toFixed(4)} chars=${responseText.length}`);
-
-          // Send to Telegram
-          await sendToTelegram(responseText, ctx.botToken, ctx.chatId);
-          log("TELEGRAM_SENT");
-
-          // Remove reaction
-          await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
-
-          // Update R2 session
-          if (sessionId && ctx.workerUrl) {
-            try {
-              await fetch(`${ctx.workerUrl}/session-update`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  chatId: ctx.chatId,
-                  claudeSessionId: sessionId,
-                  senderId: ctx.senderId,
-                  isGroup: ctx.isGroup
-                })
-              });
-              log("R2_SESSION_UPDATED");
-            } catch (e) {
-              log(`R2_SESSION_FAILED: ${e.message}`);
-            }
-          }
-
-          // Append conversation to Memvid memory (async, non-blocking)
-          if (ctx.text && responseText) {
-            appendToMemvid(ctx, ctx.text, responseText);
-          }
-
-          currentRequestContext = null;
-        }
-      }
-    }
+    // Start query loop (no resume on fresh container start)
+    await runQueryLoop(undefined);
   } catch (err) {
-    log(`FATAL: ${err.message}`);
+    const errorMsg = err.message || "";
+    const isCliExitError = errorMsg.includes("exited with code 1") ||
+                           errorMsg.includes("process exited");
 
-    // Clear typing indicator to stop "typing..." from showing forever
-    if (typingInterval) {
-      clearInterval(typingInterval);
-      typingInterval = null;
-      log("CLEANUP cleared typing interval");
-    }
+    // Retry once on CLI exit errors - these can be transient
+    if (isCliExitError && !hasRetried) {
+      log(`CLI_EXIT_ERROR detected, retrying once...`);
+      log(`ERROR details: ${errorMsg}`);
+      hasRetried = true;
 
-    // Try to notify user if we have context
-    if (currentRequestContext) {
-      const ctx = currentRequestContext;
-      try {
-        await sendToTelegram(`Server error: ${err.message}`, ctx.botToken, ctx.chatId);
-        await removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId);
-      } catch (notifyErr) {
-        log(`CLEANUP notify failed: ${notifyErr.message}`);
+      // Clear any stored session ID that might be stale
+      if (sessionId) {
+        log(`CLEARING stale sessionId=${sessionId}`);
+        sessionId = null;
       }
-      // Clear context to prevent memory leak
-      currentRequestContext = null;
-      log("CLEANUP cleared request context");
-    }
 
-    process.exit(1);
+      // Clear R2 session if we have context (in case it was orphaned)
+      if (lastKnownWorkerUrl && lastKnownChatId) {
+        try {
+          const headers = { "Content-Type": "application/json" };
+          if (lastKnownApiKey) headers["X-API-Key"] = lastKnownApiKey;
+          await fetch(`${lastKnownWorkerUrl}/session-update`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              chatId: lastKnownChatId,
+              claudeSessionId: null,  // Clear any orphaned session
+              senderId: lastKnownSenderId,
+              isGroup: lastKnownIsGroup
+            })
+          });
+          log(`CLEARED R2 session for chat ${lastKnownChatId}`);
+        } catch (clearErr) {
+          log(`R2 session clear failed: ${clearErr.message}`);
+        }
+      }
+
+      // Small delay before retry to let resources settle
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      try {
+        // Retry with fresh state
+        await runQueryLoop(undefined);
+      } catch (retryErr) {
+        log(`FATAL after retry: ${retryErr.message}`);
+        handleFatalError(retryErr);
+      }
+    } else {
+      // Not a CLI exit error or already retried - fail permanently
+      handleFatalError(err);
+    }
   }
+}
+
+/**
+ * Handle fatal errors - cleanup and exit.
+ */
+function handleFatalError(err) {
+  const errorMsg = err.message || "Unknown error";
+  log(`FATAL: ${errorMsg}`);
+
+  // Clear typing indicator to stop "typing..." from showing forever
+  if (typingInterval) {
+    clearInterval(typingInterval);
+    typingInterval = null;
+    log("CLEANUP cleared typing interval");
+  }
+
+  // Try to notify user if we have context
+  if (currentRequestContext) {
+    const ctx = currentRequestContext;
+    // Use sync-style promise to ensure we try to notify before exit
+    sendToTelegram(`Server error: ${errorMsg}`, ctx.botToken, ctx.chatId)
+      .then(() => removeReaction(ctx.botToken, ctx.chatId, ctx.userMessageId))
+      .catch((notifyErr) => log(`CLEANUP notify failed: ${notifyErr.message}`))
+      .finally(() => {
+        currentRequestContext = null;
+        log("CLEANUP cleared request context");
+        process.exit(1);
+      });
+    return;
+  }
+
+  process.exit(1);
 }
 
 main().catch((err) => {

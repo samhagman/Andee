@@ -1,10 +1,23 @@
 #!/usr/bin/env node
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync, writeFileSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 
 const input = JSON.parse(readFileSync("/workspace/input.json", "utf-8"));
 const { message, claudeSessionId, botToken, chatId, userMessageId, workerUrl, senderId, isGroup } = input;
+
+const PERSONALITY_PATH = "/home/claude/.claude/PERSONALITY.md";
+
+// Load personality prompt at startup (appended to system prompt)
+let personalityPrompt = "";
+try {
+  if (existsSync(PERSONALITY_PATH)) {
+    personalityPrompt = readFileSync(PERSONALITY_PATH, "utf-8");
+    console.error(`[STARTUP] Loaded personality from ${PERSONALITY_PATH} (${personalityPrompt.length} chars)`);
+  }
+} catch (e) {
+  console.error(`[STARTUP] No personality file at ${PERSONALITY_PATH}, using defaults`);
+}
 
 // Timestamped logging
 function log(msg) {
@@ -108,26 +121,39 @@ async function main() {
   log(`START chat=${chatId} resume=${claudeSessionId ? "yes" : "no"}`);
   const startTime = Date.now();
 
+  // Build query options
+  const queryOptions = {
+    resume: claudeSessionId || undefined,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    allowedTools: [
+      "Read", "Write", "Edit",
+      "Bash",
+      "Glob", "Grep",
+      "WebSearch", "WebFetch",
+      "Task",
+      "Skill"
+    ],
+    settingSources: ["user"],
+    cwd: "/workspace/files",
+    model: "claude-sonnet-4-5",
+    maxTurns: 25
+  };
+
+  // Add personality prompt if loaded
+  if (personalityPrompt) {
+    queryOptions.systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: personalityPrompt
+    };
+    log(`PERSONALITY appended (${personalityPrompt.length} chars)`);
+  }
+
   try {
     for await (const msg of query({
       prompt: message,
-      options: {
-        resume: claudeSessionId || undefined,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        allowedTools: [
-          "Read", "Write", "Edit",
-          "Bash",
-          "Glob", "Grep",
-          "WebSearch", "WebFetch",
-          "Task",
-          "Skill"
-        ],
-        settingSources: ["user"],
-        cwd: "/workspace/files",
-        model: "claude-sonnet-4-5",
-        maxTurns: 25
-      }
+      options: queryOptions
     })) {
       if (msg.type === "system" && msg.subtype === "init") {
         sessionId = msg.session_id;

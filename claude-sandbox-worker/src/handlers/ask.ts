@@ -155,6 +155,8 @@ export async function handleAsk(
       isGroup,
       audioBase64,
       audioDurationSeconds,
+      images,
+      mediaGroupId,
     } = body;
 
     // Validate required fields
@@ -165,17 +167,30 @@ export async function handleAsk(
       );
     }
 
-    // Validate: need either message OR audioBase64, not both, not neither
-    if (!message && !audioBase64) {
+    // Validate: need at least one input type
+    const hasText = Boolean(message);
+    const hasAudio = Boolean(audioBase64);
+    const hasImages = images && images.length > 0;
+
+    if (!hasText && !hasAudio && !hasImages) {
       return Response.json(
-        { error: "Must provide either message or audioBase64" },
+        { error: "Must provide message, audioBase64, or images" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
 
-    if (message && audioBase64) {
+    // Cannot combine text with audio (voice messages are transcribed to text)
+    if (hasText && hasAudio) {
       return Response.json(
         { error: "Cannot provide both message and audioBase64" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Cannot combine audio with images (voice notes with photos doesn't make sense)
+    if (hasAudio && hasImages) {
+      return Response.json(
+        { error: "Cannot combine audio and images" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
@@ -214,8 +229,9 @@ export async function handleAsk(
       );
     }
 
-    const inputType = audioBase64 ? "voice" : "text";
-    console.log(`[${chatId}] Processing ${inputType} message (senderId: ${senderId}, isGroup: ${isGroup})`);
+    const inputType = audioBase64 ? "voice" : hasImages ? "photo" : "text";
+    const imageInfo = hasImages ? ` (${images!.length} image(s)${mediaGroupId ? `, album: ${mediaGroupId}` : ""})` : "";
+    console.log(`[${chatId}] Processing ${inputType} message${imageInfo} (senderId: ${senderId}, isGroup: ${isGroup})`);
 
     // Get sandbox with configurable sleep timeout
     const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
@@ -309,7 +325,7 @@ export async function handleAsk(
     }
 
     // POST message to the internal server using exec + curl
-    // This is the reliable way to communicate with the internal server
+    // Write to file first to avoid shell argument length limits (important for albums with many images)
     const messagePayload = JSON.stringify({
       text: finalMessage,
       botToken,
@@ -320,13 +336,15 @@ export async function handleAsk(
       senderId,
       isGroup,
       apiKey: ctx.env.ANDEE_API_KEY,
+      images,
+      mediaGroupId,
     });
 
-    // Escape the payload for shell
-    const escapedPayload = messagePayload.replace(/'/g, "'\\''");
+    // Write payload to temp file (avoids "Argument list too long" for large payloads)
+    await sandbox.writeFile("/tmp/message.json", messagePayload);
 
     const curlResult = await sandbox.exec(
-      `curl -s -X POST http://localhost:${PERSISTENT_SERVER_PORT}/message -H 'Content-Type: application/json' -d '${escapedPayload}'`,
+      `curl -s -X POST http://localhost:${PERSISTENT_SERVER_PORT}/message -H 'Content-Type: application/json' -d @/tmp/message.json`,
       { timeout: CURL_TIMEOUT_MS }
     );
 
@@ -351,6 +369,8 @@ export async function handleAsk(
           senderId,
           isGroup,
           apiKey: ctx.env.ANDEE_API_KEY,
+          images,
+          mediaGroupId,
         })
       );
 

@@ -362,6 +362,48 @@ Andee IS a Claude Code-based bot. It has its own skills that get copied into its
 2. Create `SKILL.md` with YAML frontmatter (`name`, `description`) and instructions
 3. Rebuild container: `cd claude-sandbox-worker && npm run dev`
 
+## Personality System
+
+Andee's personality and communication style are configured via `PERSONALITY.md`, which is appended to Claude's system prompt at runtime.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SYSTEM PROMPT COMPOSITION                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. Claude Code Base Preset (tools, safety guidelines)                  │
+│                                                                         │
+│  2. settingSources: ["user"]                                            │
+│     └── Loads: /workspace/CLAUDE.md (Telegram formatting reference)    │
+│                                                                         │
+│  3. systemPrompt.append                                                 │
+│     └── Loads: /home/claude/.claude/PERSONALITY.md                      │
+│         └── Identity, voice, formatting, capabilities                   │
+│                                                                         │
+│  Order: Base → CLAUDE.md → PERSONALITY.md (last = highest weight)       │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key files:**
+- `claude-sandbox-worker/.claude/PERSONALITY.md` - Source file (edit here to customize)
+- `claude-sandbox-worker/Dockerfile` - Copies to `/home/claude/.claude/` in container
+- `claude-sandbox-worker/src/scripts/persistent-server.script.js` - Loads at startup, appends to system prompt
+
+**What PERSONALITY.md contains:**
+- Identity & pronouns ("she/they", household assistant)
+- Voice & personality traits (warm, grounded, late millennial vibes)
+- Telegram formatting rules (what works, what doesn't)
+- Capabilities awareness (memory, artifacts, reminders, weather)
+- Proactive helpfulness guidelines
+
+**To customize personality:**
+1. Edit `claude-sandbox-worker/.claude/PERSONALITY.md`
+2. Rebuild: `cd claude-sandbox-worker && npm run dev` (local) or `npx wrangler deploy` (production)
+
+**Relationship to telegram-response skill:**
+Both PERSONALITY.md and the `telegram-response` skill contain Telegram formatting rules. This overlap is intentional—PERSONALITY.md provides formatting context in the system prompt, while `telegram-response` is a detailed reference Claude can consult. Repetition reinforces the behavior.
+
 ## Mini Apps (Telegram Web Apps)
 
 Skills provide rich UI via Telegram Mini Apps using Direct Link Mini Apps. See [.claude/skills/developing-andee/guides/mini-apps.md](.claude/skills/developing-andee/guides/mini-apps.md) for the complete development guide.
@@ -436,7 +478,8 @@ Andee can set and deliver scheduled reminders via the SchedulerDO Durable Object
 │  SchedulerDO (per user):                                                │
 │  • Stores reminder in SQLite                                            │
 │  • Sets DO alarm for trigger time                                       │
-│  • When alarm fires → sends directly to Telegram                        │
+│  • When alarm fires → sends to Telegram + auto-pins the message         │
+│  • If pin fails (bot not admin) → notifies user once per chat           │
 │                                                                         │
 │  Hourly Cron:                                                           │
 │  • Placeholder for future proactive messaging                           │

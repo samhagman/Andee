@@ -17,6 +17,7 @@ See [IMPLEMENTATION.md](IMPLEMENTATION.md) for:
 - Mini Apps (architecture, creating, deploying)
 - Available container tools (Read, Write, Bash, WebFetch, etc.)
 - File locations inside container
+- Customizing personality (PERSONALITY.md, system prompt composition)
 - Development workflow (terminals, local dev)
 - Skill pattern examples
 

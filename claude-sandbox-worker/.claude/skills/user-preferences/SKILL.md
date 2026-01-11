@@ -5,10 +5,18 @@ description: Manage user preferences including timezone. Handles /timezone comma
 
 # User Preferences
 
+## Getting Context
+
+The sender ID is available in the context file. Read it first:
+
+```bash
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+```
+
 ## Preferences File Location
 
 ```
-/home/claude/private/${SENDER_ID}/preferences.yaml
+/home/claude/private/{senderId}/preferences.yaml
 ```
 
 ## Handling /timezone Command
@@ -18,7 +26,8 @@ When user says `/timezone`, `/timezone <timezone>`, or mentions changing their t
 ### Show Current Timezone
 
 ```bash
-cat /home/claude/private/${SENDER_ID}/preferences.yaml 2>/dev/null | grep timezone || echo "No timezone set"
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+cat /home/claude/private/$SENDER_ID/preferences.yaml 2>/dev/null | grep timezone || echo "No timezone set"
 ```
 
 ### Set/Update Timezone
@@ -27,8 +36,9 @@ cat /home/claude/private/${SENDER_ID}/preferences.yaml 2>/dev/null | grep timezo
 2. Update preferences file:
 
 ```bash
-mkdir -p /home/claude/private/${SENDER_ID}
-cat > /home/claude/private/${SENDER_ID}/preferences.yaml << 'EOF'
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+mkdir -p /home/claude/private/$SENDER_ID
+cat > /home/claude/private/$SENDER_ID/preferences.yaml << 'EOF'
 timezone: America/New_York
 EOF
 ```

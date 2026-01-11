@@ -275,10 +275,46 @@ Paths inside the container:
 |------|---------|
 | `/workspace/files/` | Working directory for file operations |
 | `/home/claude/.claude/skills/` | Skill definitions |
+| `/home/claude/.claude/PERSONALITY.md` | Personality/style prompt (appended to system prompt) |
 | `/workspace/persistent_server.mjs` | HTTP server script (written by Worker) |
 | `/workspace/telegram_agent.log` | Agent logs (view via `/logs` endpoint) |
 
 **Important:** Port 3000 is reserved by Cloudflare Sandbox. Use port 8080 for internal services.
+
+---
+
+## Customizing Personality
+
+Andee's personality is defined in `claude-sandbox-worker/.claude/PERSONALITY.md` and appended to Claude's system prompt via `systemPrompt.append`.
+
+**What it controls:**
+- Identity & pronouns
+- Voice & tone (warm, grounded, late millennial)
+- Communication style (concise, mobile-friendly)
+- Telegram formatting awareness
+- Proactive helpfulness guidelines
+
+**To modify:**
+1. Edit `claude-sandbox-worker/.claude/PERSONALITY.md`
+2. Rebuild container: `npm run dev` (local) or `npx wrangler deploy` (production)
+
+**How it works:**
+The agent scripts (`persistent-server.script.js`, `agent-telegram.script.js`) load PERSONALITY.md at startup and pass it to the SDK:
+
+```javascript
+const personalityPrompt = readFileSync('/home/claude/.claude/PERSONALITY.md', 'utf-8');
+query({
+  options: {
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      append: personalityPrompt
+    }
+  }
+});
+```
+
+This preserves Claude Code's base instructions while adding Andee's personality on top.
 
 ---
 

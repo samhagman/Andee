@@ -1,0 +1,39 @@
+# Test configuration - excludes Sandbox container (can't run in miniflare)
+# Used by vitest-pool-workers for integration testing
+
+name = "claude-sandbox-worker-test"
+main = "src/test-entry.ts"
+compatibility_date = "2024-12-01"
+
+# Only SchedulerDO is testable in miniflare
+[durable_objects]
+bindings = [
+  { name = "Scheduler", class_name = "SchedulerDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SchedulerDO"]
+
+# R2 bindings (auto-mocked by miniflare)
+[[r2_buckets]]
+binding = "TRANSCRIPTS"
+bucket_name = "andee-transcripts"
+
+[[r2_buckets]]
+binding = "SESSIONS"
+bucket_name = "andee-sessions"
+
+[[r2_buckets]]
+binding = "SNAPSHOTS"
+bucket_name = "andee-snapshots"
+
+# Import .script.js files as raw text
+[[rules]]
+type = "Text"
+globs = ["**/*.script.js"]
+fallthrough = true
+
+# Workers AI binding (mocked in tests)
+[ai]
+binding = "AI"

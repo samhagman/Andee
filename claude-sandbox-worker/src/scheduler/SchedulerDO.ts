@@ -71,6 +71,11 @@ export class SchedulerDO extends DurableObject<SchedulerEnv> {
       );
       CREATE INDEX IF NOT EXISTS idx_pending_trigger
         ON reminders(trigger_at) WHERE status = 'pending';
+
+      CREATE TABLE IF NOT EXISTS pin_notifications (
+        chat_id TEXT PRIMARY KEY,
+        notified_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -262,10 +267,11 @@ export class SchedulerDO extends DurableObject<SchedulerEnv> {
   }
 
   /**
-   * Send a reminder message to Telegram.
+   * Send a reminder message to Telegram and attempt to pin it.
    */
   private async sendReminderToTelegram(reminder: ReminderData): Promise<void> {
     const url = `https://api.telegram.org/bot${reminder.botToken}/sendMessage`;
+    let messageId: number | null = null;
 
     const response = await fetch(url, {
       method: "POST",
@@ -277,7 +283,14 @@ export class SchedulerDO extends DurableObject<SchedulerEnv> {
       }),
     });
 
-    if (!response.ok) {
+    if (response.ok) {
+      // Extract message_id from successful response
+      const data = (await response.json()) as {
+        ok: boolean;
+        result?: { message_id: number };
+      };
+      messageId = data.result?.message_id ?? null;
+    } else {
       // Try without markdown if it fails
       const plainResponse = await fetch(url, {
         method: "POST",
@@ -288,10 +301,111 @@ export class SchedulerDO extends DurableObject<SchedulerEnv> {
         }),
       });
 
-      if (!plainResponse.ok) {
+      if (plainResponse.ok) {
+        // Extract message_id from successful fallback response
+        const data = (await plainResponse.json()) as {
+          ok: boolean;
+          result?: { message_id: number };
+        };
+        messageId = data.result?.message_id ?? null;
+      } else {
         const errorText = await plainResponse.text();
         throw new Error(`Telegram API error: ${plainResponse.status} - ${errorText}`);
       }
+    }
+
+    // Attempt to pin the message (best-effort)
+    if (messageId) {
+      const pinned = await this.pinMessage(
+        reminder.botToken,
+        reminder.chatId,
+        messageId
+      );
+      if (!pinned) {
+        // Notify user once about pin failure
+        await this.notifyPinFailure(reminder.botToken, reminder.chatId);
+      }
+    }
+  }
+
+  /**
+   * Pin a message in a Telegram chat.
+   * Returns true on success, false on failure (best-effort, doesn't throw).
+   */
+  private async pinMessage(
+    botToken: string,
+    chatId: string,
+    messageId: number
+  ): Promise<boolean> {
+    try {
+      const url = `https://api.telegram.org/bot${botToken}/pinChatMessage`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          disable_notification: true, // Silent pin - no "Bot pinned a message"
+        }),
+      });
+
+      if (response.ok) {
+        console.log(`[SchedulerDO] Pinned message ${messageId} in chat ${chatId}`);
+        return true;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.log(
+          `[SchedulerDO] Failed to pin message ${messageId} in chat ${chatId}:`,
+          errorData
+        );
+        return false;
+      }
+    } catch (error) {
+      console.log(`[SchedulerDO] Error pinning message: ${error}`);
+      return false;
+    }
+  }
+
+  /**
+   * Notify user once about pin failure in a chat.
+   * Only sends notification if we haven't already notified for this chat.
+   */
+  private async notifyPinFailure(
+    botToken: string,
+    chatId: string
+  ): Promise<void> {
+    // Check if we've already notified for this chat
+    const existing = this.sql
+      .exec("SELECT chat_id FROM pin_notifications WHERE chat_id = ?", chatId)
+      .toArray();
+
+    if (existing.length > 0) {
+      // Already notified, skip
+      return;
+    }
+
+    // Send the tip message
+    try {
+      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: "💡 Tip: Make me an admin with \"Pin Messages\" permission so I can pin reminders for you!",
+        }),
+      });
+
+      // Record that we've notified this chat
+      this.sql.exec(
+        "INSERT INTO pin_notifications (chat_id, notified_at) VALUES (?, ?)",
+        chatId,
+        Date.now()
+      );
+      console.log(`[SchedulerDO] Sent pin failure notification to chat ${chatId}`);
+    } catch (error) {
+      // Best effort - don't fail if notification fails
+      console.log(`[SchedulerDO] Failed to send pin notification: ${error}`);
     }
   }
 

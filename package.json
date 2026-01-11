@@ -1,0 +1,22 @@
+{
+  "name": "andee",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Andee - Telegram Bot powered by Claude Code Agent SDK",
+  "scripts": {
+    "test": "concurrently -n sandbox,telegram -c blue,magenta \"npm run test:sandbox\" \"npm run test:telegram\"",
+    "test:seq": "npm run test:sandbox && npm run test:telegram",
+    "test:sandbox": "cd claude-sandbox-worker && npx vitest run",
+    "test:telegram": "cd claude-telegram-bot && npx vitest run",
+    "test:ci": "concurrently -n sandbox,telegram -c blue,magenta \"npm run test:sandbox -- --reporter=verbose\" \"npm run test:telegram -- --reporter=verbose\"",
+    "test:coverage": "npm run test:coverage --prefix claude-sandbox-worker && npm run test:coverage --prefix claude-telegram-bot",
+    "typecheck": "concurrently -n sandbox,telegram -c blue,magenta \"npm run typecheck:sandbox\" \"npm run typecheck:telegram\"",
+    "typecheck:sandbox": "cd claude-sandbox-worker && npx tsc --noEmit",
+    "typecheck:telegram": "cd claude-telegram-bot && npx tsc --noEmit",
+    "dev:sandbox": "npm run dev --prefix claude-sandbox-worker",
+    "dev:telegram": "npm run dev --prefix claude-telegram-bot"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

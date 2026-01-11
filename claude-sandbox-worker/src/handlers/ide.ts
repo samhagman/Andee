@@ -42,8 +42,8 @@ export async function handleSandboxes(ctx: HandlerContext): Promise<Response> {
       const senderId = isGroup ? "groups" : parts[0];
       const chatId = isGroup ? parts[1] : parts[1] || parts[0];
 
-      // Generate sandbox ID (matches how getSandbox is called elsewhere)
-      const id = isGroup ? `chat-group-${chatId}` : `chat-${senderId}-${chatId}`;
+      // Generate sandbox ID (must match ask.ts which uses `chat-${chatId}`)
+      const id = `chat-${chatId}`;
 
       // Generate display name
       let displayName: string;

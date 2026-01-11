@@ -14,6 +14,61 @@ Use this skill to create, query, and manage artifacts (recipes, lists, notes, et
 - User wants to update or modify an existing artifact
 - User asks about what lists/artifacts exist
 
+## Action vs Clarification
+
+**CRITICAL**: When the user's request is unambiguous, execute it directly. Do NOT ask for confirmation.
+
+### Recognize Direct Instructions
+
+| User Says | This Means | DO |
+|-----------|------------|-----|
+| "Add this recipe" | Direct instruction | Create the artifact immediately |
+| "Save these to my list" | Direct instruction | Create artifacts for ALL items |
+| "Add all these recipes" | Direct instruction + scope | Create artifacts for EVERY recipe shown |
+| "Put this on the grocery list" | Direct instruction | Add to grocery list now |
+
+### Do NOT Ask For Confirmation When:
+
+- User uses imperative verbs: "add", "save", "create", "put", "remember", "store"
+- User specifies scope: "all these", "both of these", "this recipe"
+- User's intent is clear from context + language
+
+**WRONG response to "Add all these recipes":**
+```
+Would you like me to save this to your recipe collection?
+```
+
+**CORRECT response to "Add all these recipes":**
+```
+*Immediately creates artifacts for each recipe*
+
+Added 9 recipes to your collection:
+• Nước Chấm (uuid: abc123)
+• Som Tum - Papaya Salad (uuid: def456)
+• Hot & Sour Soup (uuid: ghi789)
+...
+```
+
+### When to Ask for Clarification
+
+Only ask when genuinely ambiguous:
+
+| User Says | Why Ambiguous | Ask |
+|-----------|---------------|-----|
+| "That looks good" | Not an instruction | "Would you like me to save this recipe?" |
+| "The carbonara one" | Multiple could match | "Do you mean the classic or the bacon version?" |
+| "Add it" | No clear referent | "Which recipe would you like me to add?" |
+| "Make it private" | Which artifact? | "Which item should be private?" |
+
+### Process ALL Items
+
+When user says "all these", "both", "these recipes", etc.:
+1. Identify ALL items in the context (images, previous messages)
+2. Create an artifact for EACH one
+3. Report back with a summary list
+
+Never pick one item from a set when the user indicated the whole set.
+
 ## Core Concepts
 
 ### Directory Structure
@@ -44,16 +99,29 @@ Use this skill to create, query, and manage artifacts (recipes, lists, notes, et
 
 **Default**: Always use `shared/` unless user explicitly says "secret", "private", "just for me", or "hidden".
 
+## Getting Sender ID
+
+The sender's Telegram user ID is available in the context file. Read it with:
+
+```bash
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+```
+
+**Always read this before creating artifacts** - it identifies who created the artifact.
+
 ## Creating Artifacts
 
 ### Step 1: Create the File
 
 ```bash
+# First, get the sender ID
+SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+
 # Shared artifact (default)
-/home/claude/.claude/skills/managing-artifacts/scripts/create-artifact.sh recipes "Pasta Carbonara" ${SENDER_ID}
+/home/claude/.claude/skills/managing-artifacts/scripts/create-artifact.sh recipes "Pasta Carbonara" "$SENDER_ID"
 
 # Private artifact
-/home/claude/.claude/skills/managing-artifacts/scripts/create-artifact.sh recipes "Secret Family Recipe" ${SENDER_ID} private
+/home/claude/.claude/skills/managing-artifacts/scripts/create-artifact.sh recipes "Secret Family Recipe" "$SENDER_ID" private
 ```
 
 **Output**:
@@ -162,11 +230,12 @@ A classic Roman pasta dish...
 ### Save a Recipe
 
 1. User: "Save that pasta carbonara recipe we discussed"
-2. Create artifact: `create-artifact.sh recipes "Pasta Carbonara" ${SENDER_ID}`
-3. Check MENU.JSON for available cuisines/tags
-4. Edit file to add frontmatter metadata and content
-5. If new tag needed: `update-menu-vocab.sh recipes tags classic-roman "Traditional Roman dishes"`
-6. Confirm to user with UUID reference
+2. Get sender ID: `SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)`
+3. Create artifact: `create-artifact.sh recipes "Pasta Carbonara" "$SENDER_ID"`
+4. Check MENU.JSON for available cuisines/tags
+5. Edit file to add frontmatter metadata and content
+6. If new tag needed: `update-menu-vocab.sh recipes tags classic-roman "Traditional Roman dishes"`
+7. Confirm to user with UUID reference
 
 ### Find Artifacts
 

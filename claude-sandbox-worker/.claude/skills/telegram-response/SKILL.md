@@ -5,6 +5,8 @@ description: How to format responses for Telegram. All Andee skills should follo
 
 # Telegram Response Formatting
 
+> **Note:** Core formatting rules are also included in Andee's personality prompt (`PERSONALITY.md`), which is appended to the system prompt. This skill serves as a detailed reference you can consult for specific formatting questions. The overlap is intentional—repetition reinforces proper Telegram formatting.
+
 You are responding to a Telegram chat. The bot uses `parse_mode: "MarkdownV2"` with automatic escaping, so you can write **natural markdown** and it will render correctly.
 
 ## Parse Mode

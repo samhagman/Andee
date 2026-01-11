@@ -69,6 +69,9 @@ RUN ln -s /home/claude/.claude/skills/reminders/scripts/set-reminder.sh /usr/loc
 # Copy CLAUDE.md for project-level instructions (Claude Code finds this from cwd)
 COPY --chown=claude:claude CLAUDE.md /workspace/CLAUDE.md
 
+# Copy PERSONALITY.md for personality/style prompt (loaded by agent scripts)
+COPY --chown=claude:claude .claude/PERSONALITY.md /home/claude/.claude/PERSONALITY.md
+
 # Expose port 8080 for persistent server (3000 is used by Sandbox infrastructure)
 # Expose port 8081 for ttyd web terminal (used by Sandbox IDE)
 EXPOSE 8080 8081

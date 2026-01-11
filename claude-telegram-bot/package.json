@@ -7,14 +7,21 @@
     "deploy": "npm run deploy-secrets && wrangler deploy",
     "deploy-secrets": "node scripts/deploy-secrets.mjs",
     "deploy-code": "wrangler deploy",
-    "set-webhook": "node scripts/set-webhook.mjs"
+    "set-webhook": "node scripts/set-webhook.mjs",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest run --coverage",
+    "test:ci": "vitest run --reporter=verbose"
   },
   "dependencies": {
     "grammy": "^1.39.2"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.1",
     "@cloudflare/workers-types": "^4.20241230.0",
     "typescript": "^5.9.3",
+    "vitest": "^3.2.0",
     "wrangler": "^4.0.0"
   }
 }

@@ -1,0 +1,15 @@
+# Test configuration for claude-telegram-bot
+# Used by vitest-pool-workers for integration testing
+
+name = "claude-telegram-bot-test"
+main = "src/test-entry.ts"
+compatibility_date = "2024-12-01"
+
+# R2 binding for session storage (auto-mocked by miniflare)
+[[r2_buckets]]
+binding = "SESSIONS"
+bucket_name = "andee-sessions-test"
+
+# Note: SANDBOX_WORKER service binding is NOT included here
+# It will be mocked via fetchMock in tests since miniflare
+# cannot run the actual sandbox-worker
