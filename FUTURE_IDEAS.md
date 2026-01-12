@@ -760,7 +760,7 @@ const session = await claude.startSession({
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  $ curl -s -X POST https://claude-sandbox-worker.../reset \            │
+│  $ curl -s -X POST https://claude-sandbox-worker.../restart \            │
 │      -H "Content-Type: application/json" \                              │
 │      -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \  ← EXPOSED!│
 │      -d '{"chatId":"test-direct-link"}'                                 │
@@ -773,7 +773,7 @@ const session = await claude.startSession({
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  $ curl -s -X POST https://claude-sandbox-worker.../reset \            │
+│  $ curl -s -X POST https://claude-sandbox-worker.../restart \            │
 │      -H "Content-Type: application/json" \                              │
 │      -H "X-API-Key: $ANDEE_API_KEY" \                        ← SAFE!   │
 │      -d '{"chatId":"test-direct-link"}'                                 │
@@ -800,12 +800,12 @@ const session = await claude.startSession({
 
 ```markdown
 # Before (insecure)
-curl -X POST http://localhost:8787/reset \
+curl -X POST http://localhost:8787/restart \
   -H "X-API-Key: adk_your_key_here" \
   -d '{"chatId":"test"}'
 
 # After (secure)
-curl -X POST http://localhost:8787/reset \
+curl -X POST http://localhost:8787/restart \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"test"}'
 ```

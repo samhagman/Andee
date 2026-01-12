@@ -20,8 +20,14 @@ curl -X POST http://localhost:8787/ask \
 # Debug container issues
 curl -H "X-API-Key: $ANDEE_API_KEY" http://localhost:8787/diag | jq .
 
-# Reset a chat's sandbox (creates snapshot first)
-curl -X POST http://localhost:8787/reset \
+# Restart a chat's sandbox (keeps session, creates snapshot first)
+curl -X POST http://localhost:8787/restart \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"test","senderId":"123","isGroup":false}'
+
+# Factory reset (wipes session, creates snapshot first)
+curl -X POST http://localhost:8787/factory-reset \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"test","senderId":"123","isGroup":false}'
@@ -67,18 +73,21 @@ Telegram bot powered by Claude Code Agent SDK with persistent server in Cloudfla
 │  │  HTTP Server (port 8080)  ◄──────  Worker POST /message         │   │
 │  │       │                                                         │   │
 │  │       ▼                                                         │   │
-│  │  Async Generator ──► Claude Agent SDK ──► Claude (stays alive)  │   │
-│  │       │                                                         │   │
-│  │       ▼                                                         │   │
+│  │  Message Queue ──► while(true) loop ──► query() per message     │   │
+│  │       │                    │                                    │   │
+│  │       │                    ▼                                    │   │
+│  │       │           Claude Agent SDK (session resumption)         │   │
+│  │       │                    │                                    │   │
+│  │       ▼                    ▼                                    │   │
 │  │  Response ──► Telegram API (direct from container)              │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
-│  Key: Claude CLI starts ONCE, handles multiple messages via generator   │
-│       Subsequent messages skip ~3.5s CLI startup overhead               │
+│  Key: One query() call per message with session resumption.             │
+│       Messages queued while busy are processed after current completes. │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Message flow**: Bot sends `POST /ask` → Worker checks if persistent server running → If not, starts via `startProcess()` → POST message to internal HTTP server → Claude processes via streaming input → Responds directly to Telegram.
+**Message flow**: Bot sends `POST /ask` → Worker checks if persistent server running → If not, starts via `startProcess()` → POST message to internal HTTP server → Message queued → `while(true)` loop picks up message → `query()` call with session resumption → Responds directly to Telegram → Loop waits for next message.
 
 **Voice message flow**:
 ```
@@ -220,8 +229,8 @@ curl -X POST http://localhost:8787/ask \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"message":"Hello!","botToken":"$BOT_TOKEN","userMessageId":1}'
 
-# Reset TEST_USER_1's sandbox
-curl -X POST http://localhost:8787/reset \
+# Restart TEST_USER_1's sandbox (keeps session)
+curl -X POST http://localhost:8787/restart \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'
@@ -316,6 +325,19 @@ On cold start:
 2. Read user timezone from `/home/claude/private/{senderId}/preferences.yaml`
 3. Start persistent server with `TZ={timezone}` env var (defaults to UTC)
 
+## Snapshot Behavior
+
+Snapshots are created automatically to preserve `/workspace` and `/home/claude` directories:
+
+| Trigger | When | Notes |
+|---------|------|-------|
+| Per-message (async) | After each Claude response | Non-blocking, ~1-2s in background |
+| Fallback (idle) | After 55 minutes idle | Safety net before container sleeps |
+| Pre-reset | Before `/reset` or `/factory-reset` | Ensures data preserved before destroy |
+| Manual | `POST /snapshot` endpoint | On-demand backup |
+
+**Per-message snapshots** are the primary method - they ensure you never lose more than one message worth of work, even for active chats. The 55-minute idle fallback exists as a safety net.
+
 ## Gotchas
 
 | Problem | Error | Solution |
@@ -330,6 +352,7 @@ On cold start:
 | Timezone not set | Reminders fire at wrong time | User must set timezone via "My timezone is X" or /timezone command |
 | node-pty build fails | `gyp ERR! build error` | Add build-essential + python3 to Dockerfile before `npm install -g node-pty` |
 | Terminal lines wrong position | Text at random positions | Ensure ws-terminal.js uses `pty.spawn()`, not `child_process.spawn()` |
+| IDE terminal not connecting | `ProcessExitedBeforeReadyError: Process exited with code 0` | ws-terminal.js thought healthy server exists (stale PID/port state). Restart sandbox via IDE button or `/restart` endpoint to clear stale state. |
 
 ## Skills System
 
@@ -546,13 +569,14 @@ curl "http://localhost:8787/reminders?senderId=123456789" \
 | `/` | GET | Health check |
 | `/ask` | POST | Process message or voice (text via `message`, voice via `audioBase64`) |
 | `/logs?chatId=X` | GET | Read agent logs from container |
-| `/reset` | POST | Snapshot + destroy sandbox + delete R2 session |
+| `/restart` | POST | Snapshot + restart container (keeps session) |
+| `/factory-reset` | POST | Snapshot + destroy sandbox + delete R2 session |
 | `/session-update` | POST | Update session in R2 (called by agent) |
 | `/diag` | GET | Run diagnostics on container |
 | `/snapshot` | POST | Create filesystem snapshot (backup /workspace + /home/claude) |
 | `/snapshot?chatId=X` | GET | Get latest snapshot (returns tar.gz) |
 | `/snapshots?chatId=X` | GET | List all snapshots for a chat |
-| `/snapshot?chatId=X&key=Y` | DELETE | Delete specific snapshot (key=all to delete all) |
+| `/restore` | POST | Restore a specific snapshot to the sandbox |
 | `/schedule-reminder` | POST | Schedule a reminder via SchedulerDO |
 | `/cancel-reminder` | POST | Cancel a pending reminder |
 | `/complete-reminder` | POST | Mark reminder as completed |

@@ -5,13 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 
-import { workerUrl } from "../lib/api";
+import { workerUrl, getApiKey } from "../lib/api";
 import type { ConnectionStatus } from "../lib/types";
-
-// Get API key from localStorage
-function getApiKey(): string {
-  return localStorage.getItem("andee-ide-api-key") || "";
-}
 
 export class Terminal {
   private term: XTerm;

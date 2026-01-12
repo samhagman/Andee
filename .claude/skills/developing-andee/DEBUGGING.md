@@ -69,6 +69,67 @@ The terminal uses node-pty for full PTY support:
 
 The terminal is served by `claude-sandbox-worker/.claude/scripts/ws-terminal.js` on port 8081. Uses node-pty for proper PTY emulation (required for Claude Code TUI to work).
 
+### Terminal Connection Troubleshooting
+
+The terminal uses a robust health-checking architecture to handle reconnection scenarios:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ws-terminal.js HEALTH CHECKING ARCHITECTURE                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  On startup, checks for existing healthy server:                        │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  1. PID file exists? (/tmp/ws-terminal.pid)                      │   │
+│  │           │                                                       │   │
+│  │           ▼                                                       │   │
+│  │  2. Process still alive? (kill -0 $pid)                          │   │
+│  │           │                                                       │   │
+│  │           ▼                                                       │   │
+│  │  3. Port 8081 accepting connections? (TCP connect test)          │   │
+│  │           │                                                       │   │
+│  │           ▼                                                       │   │
+│  │  ALL THREE TRUE? → Exit with code 0 (healthy server exists)      │   │
+│  │  ANY FALSE?      → Clean up stale state → Start fresh server     │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  KEY: Requires BOTH process alive AND port listening.                   │
+│  A stale PID file alone or port in TIME_WAIT won't cause false exit.   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Common Terminal Issues:**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `ProcessExitedBeforeReadyError: code 0` | ws-terminal.js thought healthy server exists (stale state) | Restart sandbox via IDE button or `/restart` endpoint |
+| `ProcessExitedBeforeReadyError: code 1` | Port 8081 bind failed (EADDRINUSE) | Usually resolves after retry; if persistent, restart sandbox |
+| Terminal connects then immediately disconnects | Container killed by version rollout | Wait 30-45 seconds after deploy, then restart sandbox |
+| "500" errors on WebSocket connect | ws-terminal.js failed to start | Check worker logs via `wrangler tail`; restart sandbox |
+
+**Diagnosing Terminal Issues:**
+
+```bash
+# 1. Check worker logs for ws-terminal startup
+cd claude-sandbox-worker && npx wrangler tail --format pretty
+
+# 2. Look for these key log messages:
+# [IDE] Port 8081 status: listening/not listening
+# [IDE] Starting ws-terminal server for sandbox X
+# [IDE] ws-terminal started for sandbox X
+
+# 3. If terminal fails to start, you'll see:
+# ProcessExitedBeforeReadyError: Process exited with code 0/1 before becoming ready
+
+# 4. Restart sandbox to clear stale state:
+curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"YOUR_CHAT_ID","senderId":"YOUR_SENDER_ID","isGroup":false}'
+```
+
 ---
 
 ## Real-time Log Tailing
@@ -111,21 +172,23 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 ### Example Log Output
 
 ```
-[2026-01-05T03:24:43.457Z] SERVER starting on port 8080
-[2026-01-05T03:24:43.471Z] CLAUDE starting query loop with streaming input...
-[2026-01-05T03:24:43.483Z] GENERATOR waiting for message...
-[2026-01-05T03:24:43.484Z] SERVER ready on port 8080
-[2026-01-05T03:24:43.999Z] MESSAGE received: chat=log-test text=hi...
-[2026-01-05T03:24:44.000Z] GENERATOR yielding message: hi...
-[2026-01-05T03:24:44.001Z] GENERATOR waiting for message...  ← Ready for next message!
-[2026-01-05T03:24:45.887Z] SESSION id=ff7963e6-e432-4823-b93f-4334ac157edc
-[2026-01-05T03:24:50.350Z] COMPLETE cost=$0.0072 chars=35
-[2026-01-05T03:24:50.730Z] TELEGRAM_SENT
-[2026-01-05T03:24:51.316Z] R2_SESSION_UPDATED
-[2026-01-05T03:25:15.363Z] MESSAGE received: chat=log-test text=what is 2+2...  ← Second message!
-[2026-01-05T03:25:15.364Z] GENERATOR yielding message: what is 2+2...
-[2026-01-05T03:25:18.910Z] COMPLETE cost=$0.0180 chars=55
-[2026-01-05T03:25:19.199Z] TELEGRAM_SENT
+[2026-01-11T16:07:26.749Z] SERVER starting on port 8080
+[2026-01-11T16:07:26.751Z] SERVER ready on port 8080
+[2026-01-11T16:07:26.752Z] LOOP starting (session=null)
+[2026-01-11T16:07:26.753Z] LOOP waiting for message...
+[2026-01-11T16:07:26.999Z] MESSAGE received: text=What is 2+2?...
+[2026-01-11T16:07:27.000Z] LOOP processing: What is 2+2?...
+[2026-01-11T16:07:27.166Z] MESSAGE received: text=What is 3+3?...  ← ARRIVED WHILE BUSY (queued)
+[2026-01-11T16:07:30.567Z] SESSION id=ff7963e6-e432-4823-b93f-4334ac157edc
+[2026-01-11T16:07:30.750Z] COMPLETE cost=$0.0074 chars=1
+[2026-01-11T16:07:31.090Z] TELEGRAM_SENT
+[2026-01-11T16:07:31.316Z] R2_SESSION_UPDATED
+[2026-01-11T16:07:33.095Z] LOOP iteration complete, waiting for next message...
+[2026-01-11T16:07:33.095Z] LOOP processing: What is 3+3?...        ← PICKED UP FROM QUEUE!
+[2026-01-11T16:07:36.986Z] COMPLETE cost=$0.0090 chars=1
+[2026-01-11T16:07:37.458Z] TELEGRAM_SENT
+[2026-01-11T16:07:39.463Z] LOOP iteration complete, waiting for next message...
+[2026-01-11T16:07:39.463Z] LOOP waiting for message...             ← READY FOR MORE
 ```
 
 ---
@@ -135,14 +198,16 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 | Event | Meaning |
 |-------|---------|
 | `SERVER starting/ready` | HTTP server lifecycle |
-| `GENERATOR waiting/yielding` | Streaming input mode state |
-| `MESSAGE received` | New message from Worker |
+| `LOOP starting/waiting/processing` | Message loop state |
+| `LOOP iteration complete` | query() finished, ready for next message |
+| `MESSAGE received` | New message from Worker (may be queued if busy) |
 | `SESSION id=X` | Claude session ID captured |
 | `TOOL_START/TOOL_END` | Tool execution tracking |
 | `COMPLETE cost=$X chars=Y` | Response complete with cost |
 | `TELEGRAM_SENT` | Response sent to user |
 | `R2_SESSION_UPDATED` | Session persisted to R2 |
-| `AUTO_SNAPSHOT creating/created/error` | Auto-snapshot (55min idle) |
+| `ASYNC_SNAPSHOT success/failed/error` | Per-message snapshot (fires after each response) |
+| `AUTO_SNAPSHOT creating/created/error` | Fallback snapshot (55min idle) |
 | `[TEST] Skipping {method}` | Grammy API call skipped for test user (telegram-bot only) |
 | `[VOICE] Received voice message` | Audio data received from Telegram |
 | `[VOICE] Starting transcription` | Beginning Workers AI Whisper call |
@@ -226,10 +291,22 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshots?chatI
 
 # Get latest snapshot (returns tar.gz)
 curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot?chatId=CHAT_ID" -o snapshot.tar.gz
-
-# Delete all snapshots for a chat
-curl -s -X DELETE "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot?chatId=CHAT_ID&key=all"
 ```
+
+### Snapshot Immutability Policy
+
+> **NEVER delete snapshots.** Snapshots are append-only and serve as an immutable historical record. If you need a clean slate, create an empty snapshot and restore to it—don't delete history.
+
+**Why?**
+- Snapshots are the audit trail / undo history
+- Deleting loses the ability to recover from mistakes
+- Storage is cheap; history is invaluable
+
+**Need a fresh start?** Use `/factory-reset` via Telegram or the API. This:
+1. Creates a pre-reset snapshot (preserving history)
+2. Destroys the container
+3. Wipes the session (amnesia)
+4. Next message starts fresh but can still restore old snapshots if needed
 
 ### Wrangler R2 Commands
 
@@ -243,17 +320,19 @@ npx wrangler r2 object list andee-snapshots --prefix=snapshots/CHAT_ID/ --remote
 # Download a snapshot
 npx wrangler r2 object get andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00.000Z.tar.gz --file=snapshot.tar.gz --remote
 
-# Delete a snapshot
-npx wrangler r2 object delete andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00.000Z.tar.gz --remote
+# ⚠️ DO NOT DELETE SNAPSHOTS - See "Snapshot Immutability Policy" above
 ```
 
 ### Snapshot Lifecycle
 
 | Trigger | When |
 |---------|------|
-| Auto (idle timer) | After 55 minutes of inactivity (before 1h sleep) |
-| Pre-reset | Before `/reset` destroys the sandbox |
+| Per-message (async) | After each Claude response sent to Telegram (non-blocking) |
+| Fallback (idle timer) | After 55 minutes of inactivity (before 1h sleep) |
+| Pre-reset | Before `/reset` or `/factory-reset` destroys the sandbox |
 | Manual | User calls `/snapshot` command in Telegram |
+
+**Note**: Per-message snapshots ensure you never lose more than one message worth of data. The idle timer is a fallback in case per-message snapshots fail.
 
 ### Restore Behavior
 
@@ -315,7 +394,7 @@ curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"hi","botToken":"f
 
 # 3. Wait 10 seconds, check logs
 curl -s ".../logs?chatId=perf-test" | jq -r '.log'
-# Should see: GENERATOR waiting for message... (server is persistent)
+# Should see: LOOP waiting for message... (server is persistent)
 
 # 4. Send second message (should reuse server - ~3.5s instead of ~7s)
 curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"test","botToken":"fake","userMessageId":2}'
@@ -545,14 +624,17 @@ wrangler tail claude-sandbox-worker
 ```
 [timestamp] SERVER starting      - Container spawned, HTTP server init
 [timestamp] SERVER ready         - Port 8080 listening
-[timestamp] GENERATOR waiting    - Claude ready for messages
-[timestamp] MESSAGE received     - Worker sent message
+[timestamp] LOOP starting        - Message loop started
+[timestamp] LOOP waiting         - Ready for messages (blocking)
+[timestamp] MESSAGE received     - Worker sent message (may be queued if busy)
+[timestamp] LOOP processing      - Processing message from queue
 [timestamp] SESSION id=X         - Claude session captured
 [timestamp] TOOL_START name=X    - Tool execution began
 [timestamp] TOOL_END id=X        - Tool execution finished
 [timestamp] COMPLETE cost=$X     - Response complete, shows cost
 [timestamp] TELEGRAM_SENT        - Sent to Telegram API
 [timestamp] R2_SESSION_UPDATED   - Session persisted
+[timestamp] LOOP iteration complete - Ready for next message
 ```
 
 ### Timing Breakdown (warm message)
@@ -561,4 +643,4 @@ wrangler tail claude-sandbox-worker
 - SESSION → COMPLETE: 2-4s (Anthropic API response)
 - COMPLETE → TELEGRAM_SENT: ~0.3s (network)
 
-**Key optimization**: Claude CLI starts ONCE per container lifecycle. The async generator keeps Claude alive between messages, eliminating ~3s startup overhead on subsequent messages.
+**Key optimization**: The `while(true)` loop processes messages one at a time with session resumption. Messages arriving while Claude is busy are queued and processed in order. Each `query()` call shares context via session ID.

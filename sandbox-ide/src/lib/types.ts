@@ -74,3 +74,55 @@ export type ConnectionStatus =
   | "connecting"
   | "connected"
   | "error";
+
+// Snapshot types
+export interface SnapshotInfo {
+  key: string;
+  size: number;
+  uploaded: string; // ISO timestamp
+}
+
+export interface SnapshotListResponse {
+  chatId: string;
+  count: number;
+  snapshots: SnapshotInfo[];
+}
+
+export interface SnapshotFilesResponse {
+  path: string;
+  entries: Array<{
+    name: string;
+    type: "file" | "directory";
+    path: string;
+  }>;
+  snapshotKey: string;
+}
+
+export interface SnapshotFileResponse {
+  path: string;
+  content: string;
+  encoding: "utf-8" | "base64";
+  snapshotKey: string;
+}
+
+export interface RestoreRequest {
+  chatId: string;
+  senderId: string;
+  isGroup: boolean;
+  snapshotKey: string;
+  markAsLatest?: boolean;
+}
+
+export interface RestoreResponse {
+  success: boolean;
+  restoredFrom: string;
+  newSnapshotKey?: string;
+  error?: string;
+}
+
+// Preview mode state
+export interface PreviewState {
+  active: boolean;
+  snapshotKey: string | null;
+  snapshotDate: string | null;
+}

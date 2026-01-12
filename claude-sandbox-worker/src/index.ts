@@ -9,12 +9,12 @@
  *   GET  /diag              Diagnostic tests
  *   GET  /logs              Read agent logs
  *   POST /ask               Fire-and-forget (persistent server)
- *   POST /reset             Destroy sandbox and session (snapshots first)
+ *   POST /restart           Restart container (keeps session)
+ *   POST /factory-reset     Wipe sandbox and session (fresh start)
  *   POST /session-update    Update session in R2
  *   POST /snapshot          Create filesystem snapshot
  *   GET  /snapshot          Get latest snapshot (tar.gz)
  *   GET  /snapshots         List all snapshots
- *   DELETE /snapshot        Delete snapshot(s)
  *   POST /schedule-reminder Schedule a reminder via SchedulerDO
  *   POST /cancel-reminder   Cancel a pending reminder
  *   POST /complete-reminder Mark reminder as completed
@@ -40,12 +40,15 @@ import {
   handleAsk,
   handleDiag,
   handleLogs,
-  handleReset,
+  handleRestart,
+  handleFactoryReset,
   handleSessionUpdate,
   handleSnapshotCreate,
   handleSnapshotGet,
   handleSnapshotsList,
-  handleSnapshotDelete,
+  handleSnapshotRestore,
+  handleSnapshotFiles,
+  handleSnapshotFile,
   handleScheduleReminder,
   handleCancelReminder,
   handleCompleteReminder,
@@ -146,9 +149,15 @@ export default {
         }
         break;
 
-      case "/reset":
+      case "/restart":
         if (request.method === "POST") {
-          return handleReset(ctx);
+          return handleRestart(ctx);
+        }
+        break;
+
+      case "/factory-reset":
+        if (request.method === "POST") {
+          return handleFactoryReset(ctx);
         }
         break;
 
@@ -165,14 +174,29 @@ export default {
         if (request.method === "GET") {
           return handleSnapshotGet(ctx);
         }
-        if (request.method === "DELETE") {
-          return handleSnapshotDelete(ctx);
-        }
         break;
 
       case "/snapshots":
         if (request.method === "GET") {
           return handleSnapshotsList(ctx);
+        }
+        break;
+
+      case "/restore":
+        if (request.method === "POST") {
+          return handleSnapshotRestore(ctx);
+        }
+        break;
+
+      case "/snapshot-files":
+        if (request.method === "GET") {
+          return handleSnapshotFiles(ctx);
+        }
+        break;
+
+      case "/snapshot-file":
+        if (request.method === "GET") {
+          return handleSnapshotFile(ctx);
         }
         break;
 

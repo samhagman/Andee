@@ -6,6 +6,12 @@ import type {
   FileReadResponse,
   FileWriteRequest,
   FileWriteResponse,
+  Sandbox,
+  SnapshotListResponse,
+  SnapshotFilesResponse,
+  SnapshotFileResponse,
+  RestoreRequest,
+  RestoreResponse,
 } from "./types";
 
 const DEV_WORKER_URL = "http://localhost:8787";
@@ -21,8 +27,14 @@ function getWebSocketUrl(): string {
   return base.replace(/^http/, "ws");
 }
 
-// Get API key from localStorage or prompt user
-function getApiKey(): string {
+// Get API key - hardcoded for local dev, localStorage for production
+export function getApiKey(): string {
+  // Local development: use hardcoded key (matches claude-sandbox-worker/.dev.vars)
+  if (import.meta.env.DEV) {
+    return "adk_8dfeed669475a5661b976ff13249c20c";
+  }
+
+  // Production: prompt user and store in localStorage
   let apiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
   if (!apiKey) {
     apiKey = prompt("Enter your Andee API key (adk_...):");
@@ -126,3 +138,59 @@ export async function getTerminalUrl(sandbox: string): Promise<string> {
 // Export URLs for debugging
 export const workerUrl = getWorkerUrl;
 export const wsUrl = getWebSocketUrl;
+
+// List snapshots for a sandbox
+export async function listSnapshots(
+  sandbox: Sandbox
+): Promise<SnapshotListResponse> {
+  const params = new URLSearchParams({
+    chatId: sandbox.chatId,
+    senderId: sandbox.senderId,
+    isGroup: String(sandbox.isGroup),
+  });
+  return fetchApi<SnapshotListResponse>(`/snapshots?${params}`);
+}
+
+// List files in a snapshot (for preview mode)
+export async function listSnapshotFiles(
+  sandbox: Sandbox,
+  snapshotKey: string,
+  path: string
+): Promise<SnapshotFilesResponse> {
+  const params = new URLSearchParams({
+    sandbox: sandbox.id,
+    snapshotKey,
+    path,
+    chatId: sandbox.chatId,
+    senderId: sandbox.senderId,
+    isGroup: String(sandbox.isGroup),
+  });
+  return fetchApi<SnapshotFilesResponse>(`/snapshot-files?${params}`);
+}
+
+// Read a single file from a snapshot (for preview mode)
+export async function readSnapshotFile(
+  sandbox: Sandbox,
+  snapshotKey: string,
+  path: string
+): Promise<SnapshotFileResponse> {
+  const params = new URLSearchParams({
+    sandbox: sandbox.id,
+    snapshotKey,
+    path,
+    chatId: sandbox.chatId,
+    senderId: sandbox.senderId,
+    isGroup: String(sandbox.isGroup),
+  });
+  return fetchApi<SnapshotFileResponse>(`/snapshot-file?${params}`);
+}
+
+// Restore a snapshot
+export async function restoreSnapshot(
+  request: RestoreRequest
+): Promise<RestoreResponse> {
+  return fetchApi<RestoreResponse>("/restore", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}

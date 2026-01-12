@@ -295,10 +295,13 @@ andee-snapshots/
 
 ### Snapshot Lifecycle
 
-- **Auto-snapshot**: 55 minutes after last activity (before container sleeps)
-- **Pre-reset snapshot**: Automatically created when /reset is called
+- **Per-message snapshot**: Async, non-blocking snapshot after each Claude response (primary method)
+- **Fallback snapshot**: 55 minutes after last activity (before container sleeps)
+- **Pre-reset snapshot**: Automatically created when /reset or /factory-reset is called
 - **Manual snapshot**: Via /snapshot Telegram command or POST /snapshot endpoint
 - **Restore**: Happens automatically when a fresh container starts for a chatId that has snapshots
+
+Per-message snapshots ensure minimal data loss - at most one message worth of work.
 
 ---
 

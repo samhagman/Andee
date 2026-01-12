@@ -294,15 +294,23 @@ export const sessionData = {
 // ============================================================================
 
 export const sandboxResponses = {
-  reset: {
+  factoryReset: {
     success: true,
-    message: "Sandbox reset successfully",
+    message: "Factory reset complete. Previous state saved as snapshot, session wiped.",
     snapshotKey: "snapshots/999999999/999999999/2025-01-09T10-00-00-000Z.tar.gz",
+    sessionPreserved: false,
   },
 
-  resetError: {
+  factoryResetError: {
     success: false,
-    error: "Failed to reset sandbox",
+    error: "Failed to factory reset sandbox",
+  },
+
+  restart: {
+    success: true,
+    message: "Container restarted. Session preserved, snapshot saved.",
+    snapshotKey: "snapshots/999999999/999999999/2025-01-09T10-00-00-000Z.tar.gz",
+    sessionPreserved: true,
   },
 
   snapshot: {
@@ -337,6 +345,16 @@ export const sandboxResponses = {
     chatId: TEST_USER_1,
     count: 0,
     snapshots: [],
+  },
+
+  restore: {
+    success: true,
+    restoredFrom: "snapshots/999999999/999999999/2025-01-09T10-00-00-000Z.tar.gz",
+  },
+
+  restoreError: {
+    success: false,
+    error: "Failed to restore snapshot",
   },
 
   ask: {

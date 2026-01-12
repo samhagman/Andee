@@ -27,6 +27,36 @@ const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
 const TAR_EXTRACT_TIMEOUT_MS = 60_000;
 
 /**
+ * Build environment variables for Claude SDK based on provider toggle.
+ * When USE_OPENROUTER=true, routes to OpenRouter with specified model.
+ * Otherwise, uses Anthropic directly.
+ */
+function buildSdkEnv(env: Env, userTimezone: string): Record<string, string> {
+  const baseEnv: Record<string, string> = {
+    HOME: "/home/claude",
+    TZ: userTimezone,
+  };
+
+  if (env.USE_OPENROUTER === "true") {
+    // OpenRouter mode - route SDK through openrouter.ai
+    console.log(`[Worker] Using OpenRouter with model: ${env.OPENROUTER_MODEL || "z-ai/glm-4.7"}`);
+    return {
+      ...baseEnv,
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+      ANTHROPIC_AUTH_TOKEN: env.OPENROUTER_API_KEY || "",
+      ANTHROPIC_API_KEY: "", // Must be blank for OpenRouter
+      ANTHROPIC_DEFAULT_SONNET_MODEL: env.OPENROUTER_MODEL || "z-ai/glm-4.7",
+    };
+  } else {
+    // Anthropic direct mode (default)
+    return {
+      ...baseEnv,
+      ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+    };
+  }
+}
+
+/**
  * Restore filesystem from the latest snapshot if one exists.
  * Returns true if restored, false otherwise.
  */
@@ -301,11 +331,7 @@ export async function handleAsk(
       const server = await sandbox.startProcess(
         "node /workspace/persistent_server.mjs",
         {
-          env: {
-            ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY,
-            HOME: "/home/claude",
-            TZ: userTimezone,
-          },
+          env: buildSdkEnv(ctx.env, userTimezone),
         }
       );
 
@@ -374,8 +400,14 @@ export async function handleAsk(
         })
       );
 
+      // Build env vars string for legacy fallback (uses inline shell vars)
+      const sdkEnv = buildSdkEnv(ctx.env, "UTC");
+      const envVarsString = Object.entries(sdkEnv)
+        .map(([k, v]) => `${k}=${v ? `'${v}'` : "''"}`)
+        .join(" ");
+
       await sandbox.exec(
-        `ANTHROPIC_API_KEY=${ctx.env.ANTHROPIC_API_KEY} HOME=/home/claude nohup node /workspace/telegram_agent.mjs > /workspace/telegram_agent.log 2>&1 &`,
+        `${envVarsString} nohup node /workspace/telegram_agent.mjs > /workspace/telegram_agent.log 2>&1 &`,
         { timeout: QUICK_COMMAND_TIMEOUT_MS }
       );
     } else {

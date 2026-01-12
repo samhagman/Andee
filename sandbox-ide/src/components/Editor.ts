@@ -1,7 +1,8 @@
 // Monaco Editor Component
 
 import * as monaco from "monaco-editor";
-import { readFile, writeFile } from "../lib/api";
+import { readFile, writeFile, readSnapshotFile } from "../lib/api";
+import type { Sandbox } from "../lib/types";
 
 // Import workers using Vite's syntax
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
@@ -47,9 +48,46 @@ export class Editor {
   private openFiles: Map<string, OpenFile> = new Map();
   private currentFile: OpenFile | null = null;
 
+  // Preview mode state
+  private previewMode = false;
+  private previewSnapshotKey: string | null = null;
+  private sandbox: Sandbox | null = null;
+
   constructor(container: HTMLElement) {
     this.container = container;
     this.initEditor();
+  }
+
+  /**
+   * Set the sandbox context.
+   */
+  setSandbox(sandbox: Sandbox): void {
+    this.sandbox = sandbox;
+  }
+
+  /**
+   * Enter preview mode - files are read-only.
+   */
+  setPreviewMode(snapshotKey: string): void {
+    this.previewMode = true;
+    this.previewSnapshotKey = snapshotKey;
+    this.clear(); // Close existing files
+  }
+
+  /**
+   * Exit preview mode.
+   */
+  clearPreviewMode(): void {
+    this.previewMode = false;
+    this.previewSnapshotKey = null;
+    this.clear();
+  }
+
+  /**
+   * Check if in preview mode.
+   */
+  isPreviewMode(): boolean {
+    return this.previewMode;
   }
 
   private initEditor(): void {
@@ -92,18 +130,38 @@ export class Editor {
   }
 
   async openFile(sandboxId: string, path: string): Promise<void> {
-    const key = `${sandboxId}:${path}`;
+    // Use snapshot key as part of the key in preview mode to differentiate
+    const keyPrefix = this.previewMode && this.previewSnapshotKey
+      ? `preview:${this.previewSnapshotKey}:`
+      : "";
+    const key = `${keyPrefix}${sandboxId}:${path}`;
 
     // Check if already open
     let openFile = this.openFiles.get(key);
 
     if (!openFile) {
       try {
-        const response = await readFile(sandboxId, path);
-        const content =
-          response.encoding === "base64"
-            ? atob(response.content)
-            : response.content;
+        let content: string;
+
+        if (this.previewMode && this.previewSnapshotKey && this.sandbox) {
+          // Read from snapshot
+          const response = await readSnapshotFile(
+            this.sandbox,
+            this.previewSnapshotKey,
+            path
+          );
+          content =
+            response.encoding === "base64"
+              ? atob(response.content)
+              : response.content;
+        } else {
+          // Read from live filesystem
+          const response = await readFile(sandboxId, path);
+          content =
+            response.encoding === "base64"
+              ? atob(response.content)
+              : response.content;
+        }
 
         const language = this.detectLanguage(path);
         const model = monaco.editor.createModel(
@@ -120,14 +178,16 @@ export class Editor {
           modified: false,
         };
 
-        // Track modifications
-        model.onDidChangeContent(() => {
-          if (openFile) {
-            openFile.modified =
-              model.getValue() !== openFile.originalContent;
-            this.updateTabState(openFile);
-          }
-        });
+        // Track modifications (only in non-preview mode)
+        if (!this.previewMode) {
+          model.onDidChangeContent(() => {
+            if (openFile) {
+              openFile.modified =
+                model.getValue() !== openFile.originalContent;
+              this.updateTabState(openFile);
+            }
+          });
+        }
 
         this.openFiles.set(key, openFile);
         this.addTab(openFile);
@@ -141,10 +201,19 @@ export class Editor {
     this.currentFile = openFile;
     const editor = this.ensureEditor();
     editor.setModel(openFile.model);
+
+    // Make editor read-only in preview mode
+    editor.updateOptions({ readOnly: this.previewMode });
+
     this.updateActiveTab(key);
   }
 
   private async saveCurrentFile(): Promise<void> {
+    // Don't save in preview mode
+    if (this.previewMode) {
+      console.log("[Editor] Save disabled in preview mode");
+      return;
+    }
     if (!this.currentFile || !this.currentFile.modified) return;
 
     try {

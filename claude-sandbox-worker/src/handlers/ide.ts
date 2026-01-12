@@ -217,7 +217,22 @@ export async function handleFileWrite(ctx: HandlerContext): Promise<Response> {
 }
 
 /**
- * WS /terminal?sandbox=X&apiKey=Y - WebSocket terminal proxy to ttyd in container.
+ * WS /terminal?sandbox=X&apiKey=Y - WebSocket terminal proxy to ws-terminal.js in container.
+ *
+ * Architecture:
+ *   Browser (xterm.js) → WebSocket → Worker → sandbox.wsConnect() → ws-terminal.js:8081 → PTY → bash
+ *
+ * Process Management:
+ *   This handler is intentionally simple - it just checks if port 8081 is listening
+ *   and starts ws-terminal.js if not. The ws-terminal.js script handles its own:
+ *     - PID file management (/tmp/ws-terminal.pid)
+ *     - Health checking (requires BOTH process alive AND port accepting connections)
+ *     - Stale state cleanup (kills hung processes, removes orphan PID files)
+ *     - EADDRINUSE retry logic (up to 5 attempts with 1s delay)
+ *
+ * This separation of concerns means the Worker doesn't need complex process management -
+ * ws-terminal.js is self-healing and handles reconnection scenarios robustly.
+ *
  * Note: WebSocket connections can't use headers, so API key is passed as query param.
  */
 export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
@@ -249,29 +264,15 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
     );
   }
 
+  // Check for WebSocket upgrade header
+  const upgradeHeader = ctx.request.headers.get("Upgrade");
+  const isWebSocketRequest = upgradeHeader?.toLowerCase() === "websocket";
+  console.log(`[IDE] Terminal request - WebSocket upgrade: ${isWebSocketRequest}, Upgrade header: ${upgradeHeader}`);
+
   try {
     const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
 
-    // Ensure our custom WebSocket terminal server is running on port 8081
-    // (We use a custom server instead of ttyd because ttyd has issues with wsConnect)
-    const processes = await sandbox.listProcesses();
-    console.log(`[IDE] Container processes:`, processes.map(p => ({ pid: p.pid, cmd: p.command?.slice(0, 80) })));
-
-    // Look for our ws-terminal server
-    const wsTerminalProcess = processes.find(
-      (p) => p.command?.includes("ws-terminal.js")
-    );
-
-    // Kill any old ttyd processes (we don't use ttyd anymore)
-    const ttydProcesses = processes.filter(
-      (p) => p.command?.includes("ttyd")
-    );
-    for (const ttyd of ttydProcesses) {
-      console.log(`[IDE] Killing ttyd (pid ${ttyd.pid})`);
-      await sandbox.exec(`kill -9 ${ttyd.pid}`);
-    }
-
-    // Check if port 8081 is actually listening
+    // Check if port 8081 is already listening (ws-terminal already running)
     const portCheck = await sandbox.exec(
       "nc -z localhost 8081 && echo 'LISTENING' || echo 'NOT_LISTENING'",
       { timeout: 5000 }
@@ -279,16 +280,11 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
     const isListening = portCheck.stdout.includes("LISTENING") && !portCheck.stdout.includes("NOT_LISTENING");
     console.log(`[IDE] Port 8081 status: ${isListening ? 'listening' : 'not listening'}`);
 
-    // If process exists but port isn't listening, it crashed - kill and restart
-    if (wsTerminalProcess && !isListening) {
-      console.log(`[IDE] ws-terminal process exists but not listening, killing pid ${wsTerminalProcess.pid}`);
-      await sandbox.exec(`kill -9 ${wsTerminalProcess.pid}`);
-    }
-
-    if (!wsTerminalProcess || !isListening) {
+    if (!isListening) {
       console.log(`[IDE] Starting ws-terminal server for sandbox ${sandboxId}`);
 
       // Start our custom WebSocket terminal server with PTY support
+      // ws-terminal.js handles its own process management (checks for existing instances, retries on EADDRINUSE)
       // NOTE: NODE_PATH is required so Node.js can find globally installed packages (ws, node-pty)
       // NOTE: ANTHROPIC_API_KEY is required so `claude` command works in the terminal
       const wsTerminal = await sandbox.startProcess(
@@ -304,14 +300,24 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
         }
       );
 
-      // Wait for server to be ready
-      await wsTerminal.waitForPort(8081, { mode: "tcp", timeout: 10000 });
+      // Wait for server to be ready (with longer timeout to allow retries)
+      await wsTerminal.waitForPort(8081, { mode: "tcp", timeout: 15000 });
       console.log(`[IDE] ws-terminal started for sandbox ${sandboxId}`);
     }
 
     // Proxy WebSocket to our terminal server
+    if (!isWebSocketRequest) {
+      console.log(`[IDE] Not a WebSocket request - returning error`);
+      return Response.json(
+        { error: "Expected WebSocket upgrade request" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
     console.log(`[IDE] Proxying WebSocket to ws-terminal on port 8081`);
-    return sandbox.wsConnect(ctx.request, 8081);
+    const wsResponse = await sandbox.wsConnect(ctx.request, 8081);
+    console.log(`[IDE] wsConnect response status: ${wsResponse.status}`);
+    return wsResponse;
   } catch (error) {
     console.error("[IDE] Terminal connection failed:", error);
     return Response.json(

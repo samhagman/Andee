@@ -1,6 +1,7 @@
 /**
- * Reset endpoint: POST /reset
- * Creates a snapshot, then destroys sandbox and deletes R2 session.
+ * Factory Reset endpoint: POST /factory-reset
+ * Creates a snapshot, then destroys sandbox AND deletes R2 session.
+ * Next message will restore snapshot but start a fresh Claude session.
  */
 
 import { getSandbox } from "@cloudflare/sandbox";
@@ -13,12 +14,12 @@ import {
 } from "../types";
 import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
 
-// Snapshot configuration (shared with snapshot.ts)
+// Snapshot configuration (shared with snapshot.ts and restart.ts)
 const SNAPSHOT_DIRS = ["/workspace", "/home/claude"];
 const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
 const TAR_TIMEOUT_MS = 60_000;
 
-export async function handleReset(ctx: HandlerContext): Promise<Response> {
+export async function handleFactoryReset(ctx: HandlerContext): Promise<Response> {
   try {
     const body = (await ctx.request.json()) as ResetRequest;
     const { chatId, senderId, isGroup } = body;
@@ -30,7 +31,7 @@ export async function handleReset(ctx: HandlerContext): Promise<Response> {
       );
     }
 
-    console.log(`[Worker] Resetting sandbox for chat ${chatId} (senderId: ${senderId}, isGroup: ${isGroup})`);
+    console.log(`[Worker] Factory resetting sandbox for chat ${chatId} (senderId: ${senderId}, isGroup: ${isGroup})`);
 
     // Get sandbox for snapshot
     const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
@@ -52,7 +53,7 @@ export async function handleReset(ctx: HandlerContext): Promise<Response> {
       }
 
       if (dirsToBackup.length > 0) {
-        console.log(`[Worker] Creating pre-reset snapshot for chat ${chatId}`);
+        console.log(`[Worker] Creating pre-factory-reset snapshot for chat ${chatId}`);
 
         // Create tar archive
         const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${dirsToBackup.join(" ")} 2>/dev/null`;
@@ -77,12 +78,12 @@ export async function handleReset(ctx: HandlerContext): Promise<Response> {
                 isGroup: String(isGroup),
                 createdAt: new Date().toISOString(),
                 directories: dirsToBackup.join(","),
-                reason: "pre-reset",
+                reason: "pre-factory-reset",
               },
             });
 
             console.log(
-              `[Worker] Pre-reset snapshot saved: ${snapshotKey} (${binaryData.length} bytes)`
+              `[Worker] Pre-factory-reset snapshot saved: ${snapshotKey} (${binaryData.length} bytes)`
             );
           }
         }
@@ -90,34 +91,35 @@ export async function handleReset(ctx: HandlerContext): Promise<Response> {
         console.log(`[Worker] No content to snapshot for chat ${chatId}`);
       }
     } catch (snapshotError) {
-      // Log but don't fail the reset if snapshot fails
-      console.warn(`[Worker] Pre-reset snapshot failed (continuing): ${snapshotError}`);
+      // Log but don't fail the factory reset if snapshot fails
+      console.warn(`[Worker] Pre-factory-reset snapshot failed (continuing): ${snapshotError}`);
     }
 
     // Destroy the sandbox container
     await sandbox.destroy();
 
-    // Also delete the R2 session to prevent orphaned session IDs
+    // Delete the R2 session to start fresh (amnesia)
     if (ctx.env.SESSIONS) {
       const sessionKey = getSessionKey(chatId, senderId, isGroup);
       await ctx.env.SESSIONS.delete(sessionKey);
       console.log(`[Worker] Deleted R2 session: ${sessionKey}`);
     }
 
-    console.log(`[Worker] Sandbox destroyed for chat ${chatId}`);
+    console.log(`[Worker] Sandbox and session destroyed for chat ${chatId}`);
 
     return Response.json(
       {
         success: true,
         message: snapshotKey
-          ? "Sandbox reset. Previous state saved as snapshot."
-          : "Sandbox and session reset",
+          ? "Factory reset complete. Previous state saved as snapshot, session wiped."
+          : "Factory reset complete. Session wiped.",
         snapshotKey,
+        sessionPreserved: false,
       },
       { headers: CORS_HEADERS }
     );
   } catch (error) {
-    console.error("[Worker] Reset error:", error);
+    console.error("[Worker] Factory reset error:", error);
     return Response.json(
       {
         success: false,

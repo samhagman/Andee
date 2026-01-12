@@ -4,6 +4,9 @@
 **Scope:** Sessions, Snapshots, Multi-User Isolation, Group Chats
 **Status:** VERIFIED WITH LIVE TESTS
 
+**Changelog:**
+- **Jan 11, 2026:** `DELETE /snapshot` endpoint removed. Snapshots are now immutable—never delete them, even via wrangler. Use `/factory-reset` for a fresh start instead. Tests 19-21 document historical behavior.
+
 ---
 
 ## Executive Summary
@@ -18,7 +21,7 @@ The Andee bot's R2 storage system for sessions and snapshots has been thoroughly
 | Snapshot Key Structure | **WORKING** | Private: `snapshots/{senderId}/{chatId}/{ts}.tar.gz`, Group: `snapshots/groups/{chatId}/{ts}.tar.gz` |
 | Private Chat Isolation | **WORKING** | Each user has isolated session directory |
 | Group Chat Sharing | **WORKING** | All members share single session (intentional) |
-| Cross-User Protection | **WORKING** | Delete operations blocked for wrong senderId |
+| Cross-User Protection | **WORKING** | ~~Delete operations blocked for wrong senderId~~ DELETE endpoint removed (Jan 11, 2026) |
 | Snapshot Backup/Restore | **WORKING** | `/workspace/` and `/home/claude/` preserved |
 | Pre-Reset Snapshots | **WORKING** | Auto-creates snapshot before destroy |
 | Authentication | **WORKING** | X-API-Key required on all endpoints |
@@ -331,10 +334,13 @@ This ensures data is never lost on reset.
 
 ### Scenario 3: Cross-User Protection
 
-The system prevents users from accessing other users' data:
+> **Note (Jan 11, 2026):** The `DELETE /snapshot` endpoint was removed. Snapshots are now immutable—never delete them. The cross-user protection code shown below was part of the deleted functionality. Use `/factory-reset` for a fresh start instead of deleting snapshots.
+
+~~The system prevents users from accessing other users' data:~~
 
 ```typescript
-// snapshot.ts:297-303
+// HISTORICAL: This code was removed when DELETE /snapshot was removed
+// snapshot.ts (formerly lines 297-303)
 if (!key.startsWith(prefix)) {
   return Response.json(
     { error: "Invalid key for this chatId/senderId/isGroup combination" },
@@ -343,7 +349,7 @@ if (!key.startsWith(prefix)) {
 }
 ```
 
-**Verified in Test 20:** User 111 cannot delete User 999's snapshot.
+~~**Verified in Test 20:** User 111 cannot delete User 999's snapshot.~~
 
 ---
 
@@ -377,9 +383,9 @@ if (!key.startsWith(prefix)) {
 | 16 | Reset creates pre-snapshot | PASS | `{"snapshotKey":"snapshots/999/..."}` |
 | 17 | List after reset (2 snapshots) | PASS | `{"count":2,"snapshots":[...]}` |
 | 18 | Verify R2 keys | PASS | All keys follow expected structure |
-| 19 | Delete single snapshot | PASS | `{"success":true,"deleted":1}` |
-| 20 | Cross-user delete blocked | PASS | `{"error":"Invalid key..."}` (403) |
-| 21 | Delete all snapshots | PASS | `{"success":true,"deleted":1}` |
+| 19 | Delete single snapshot | ~~PASS~~ | ~~`{"success":true,"deleted":1}`~~ *Endpoint removed* |
+| 20 | Cross-user delete blocked | ~~PASS~~ | ~~`{"error":"Invalid key..."}` (403)~~ *Endpoint removed* |
+| 21 | Delete all snapshots | ~~PASS~~ | ~~`{"success":true,"deleted":1}`~~ *Endpoint removed* |
 
 ### R2 Key Verification
 

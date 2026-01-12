@@ -6,14 +6,19 @@ export { handleHealth } from "./health";
 export { handleAsk } from "./ask";
 export { handleDiag } from "./diag";
 export { handleLogs } from "./logs";
-export { handleReset } from "./reset";
+export { handleRestart } from "./restart";
+export { handleFactoryReset } from "./factory-reset";
 export { handleSessionUpdate } from "./sessionUpdate";
 export {
   handleSnapshotCreate,
   handleSnapshotGet,
   handleSnapshotsList,
-  handleSnapshotDelete,
+  handleSnapshotRestore,
 } from "./snapshot";
+export {
+  handleSnapshotFiles,
+  handleSnapshotFile,
+} from "./snapshot-preview";
 export {
   handleScheduleReminder,
   handleCancelReminder,

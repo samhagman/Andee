@@ -5,7 +5,12 @@ import { Terminal } from "./components/Terminal";
 import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
 import { StatusIndicator } from "./components/StatusIndicator";
-import type { Sandbox, ConnectionStatus } from "./lib/types";
+import { SnapshotPanel } from "./components/SnapshotPanel";
+import { PreviewBanner } from "./components/PreviewBanner";
+import { showConfirmModal } from "./components/ConfirmModal";
+import { showErrorModal } from "./components/ErrorModal";
+import { restoreSnapshot } from "./lib/api";
+import type { Sandbox, ConnectionStatus, PreviewState } from "./lib/types";
 
 // Global state
 let currentSandbox: Sandbox | null = null;
@@ -13,6 +18,15 @@ let terminal: Terminal | null = null;
 let fileTree: FileTree | null = null;
 let editor: Editor | null = null;
 let statusIndicator: StatusIndicator | null = null;
+let snapshotPanel: SnapshotPanel | null = null;
+let previewBanner: PreviewBanner | null = null;
+
+// Preview mode state
+let previewState: PreviewState = {
+  active: false,
+  snapshotKey: null,
+  snapshotDate: null,
+};
 
 // Initialize the IDE
 async function init() {
@@ -22,6 +36,24 @@ async function init() {
   const statusContainer = document.getElementById("status");
   if (statusContainer) {
     statusIndicator = new StatusIndicator(statusContainer);
+  }
+
+  // Initialize preview banner
+  const bannerContainer = document.getElementById("preview-banner");
+  if (bannerContainer) {
+    previewBanner = new PreviewBanner(bannerContainer, {
+      onExitPreview: handleExitPreview,
+      onRestore: handleRestoreFromPreview,
+    });
+  }
+
+  // Initialize snapshot panel
+  const snapshotContainer = document.getElementById("snapshot-panel");
+  if (snapshotContainer) {
+    snapshotPanel = new SnapshotPanel(snapshotContainer, {
+      onPreview: handleEnterPreview,
+      onRestore: handleRestore,
+    });
   }
 
   // Initialize file tree FIRST (before sandbox selector triggers auto-select)
@@ -61,19 +93,170 @@ function handleSandboxChange(sandbox: Sandbox) {
   console.log(`[IDE] Switching to sandbox: ${sandbox.displayName}`);
   currentSandbox = sandbox;
 
+  // Exit preview mode if active
+  if (previewState.active) {
+    handleExitPreview();
+  }
+
+  // Update snapshot panel
+  if (snapshotPanel) {
+    snapshotPanel.setSandbox(sandbox);
+  }
+
+  // Update file tree
+  if (fileTree) {
+    fileTree.setSandbox(sandbox);
+    fileTree.loadDirectory(sandbox.id, "/");
+  }
+
+  // Update editor
+  if (editor) {
+    editor.setSandbox(sandbox);
+    editor.clear();
+  }
+
   // Update terminal connection
   if (terminal) {
     terminal.connect(sandbox.id);
   }
+}
 
-  // Load file tree for new sandbox (start at root to see full filesystem)
-  if (fileTree) {
-    fileTree.loadDirectory(sandbox.id, "/");
+// Enter preview mode
+function handleEnterPreview(snapshotKey: string, snapshotDate: string): void {
+  console.log(`[IDE] Entering preview mode: ${snapshotKey}`);
+
+  previewState = {
+    active: true,
+    snapshotKey,
+    snapshotDate,
+  };
+
+  // Show banner
+  if (previewBanner) {
+    previewBanner.show(snapshotDate);
   }
 
-  // Clear editor
+  // Set FileTree to preview mode
+  if (fileTree) {
+    fileTree.setPreviewMode(snapshotKey);
+  }
+
+  // Set Editor to preview mode
   if (editor) {
-    editor.clear();
+    editor.setPreviewMode(snapshotKey);
+  }
+}
+
+// Exit preview mode
+async function handleExitPreview(): Promise<void> {
+  console.log("[IDE] Exiting preview mode");
+
+  previewState = {
+    active: false,
+    snapshotKey: null,
+    snapshotDate: null,
+  };
+
+  // Hide banner
+  if (previewBanner) {
+    previewBanner.hide();
+  }
+
+  // Clear FileTree preview mode
+  if (fileTree) {
+    await fileTree.clearPreviewMode();
+  }
+
+  // Clear Editor preview mode
+  if (editor) {
+    editor.clearPreviewMode();
+  }
+}
+
+// Handle restore from preview banner
+async function handleRestoreFromPreview(): Promise<void> {
+  if (!previewState.snapshotKey || !currentSandbox) return;
+
+  const result = await showConfirmModal({
+    title: "Restore This Snapshot?",
+    message: "This will replace current files with the snapshot contents.",
+    checkbox: {
+      label: "Mark as latest (create new snapshot from restored state)",
+      default: true,
+    },
+    confirmText: "Restore",
+    cancelText: "Cancel",
+  });
+
+  if (result.confirmed) {
+    await handleRestore(previewState.snapshotKey, result.checkboxValue ?? true);
+  }
+}
+
+// Handle restore
+async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promise<void> {
+  if (!currentSandbox) return;
+
+  console.log(`[IDE] Restoring snapshot: ${snapshotKey}, markAsLatest: ${markAsLatest}`);
+
+  try {
+    // Disconnect terminal before restore
+    if (terminal) {
+      terminal.disconnect();
+    }
+
+    // Call restore API
+    const result = await restoreSnapshot({
+      chatId: currentSandbox.chatId,
+      senderId: currentSandbox.senderId,
+      isGroup: currentSandbox.isGroup,
+      snapshotKey,
+      markAsLatest,
+    });
+
+    if (result.success) {
+      console.log(`[IDE] Restore successful, restoredFrom: ${result.restoredFrom}`);
+      if (result.newSnapshotKey) {
+        console.log(`[IDE] New snapshot created: ${result.newSnapshotKey}`);
+      }
+
+      // Exit preview mode if active
+      if (previewState.active) {
+        await handleExitPreview();
+      }
+
+      // Refresh file tree
+      if (fileTree && currentSandbox) {
+        await fileTree.loadDirectory(currentSandbox.id, "/");
+      }
+
+      // Refresh snapshot panel
+      if (snapshotPanel) {
+        await snapshotPanel.refresh();
+      }
+
+      // Reconnect terminal
+      if (terminal && currentSandbox) {
+        terminal.connect(currentSandbox.id);
+      }
+    } else {
+      console.error("[IDE] Restore failed:", result.error);
+      await showErrorModal({
+        title: "Restore Failed",
+        message: "The snapshot could not be restored.",
+        details: result.error,
+      });
+    }
+  } catch (error) {
+    console.error("[IDE] Restore error:", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    await showErrorModal({
+      title: "Restore Error",
+      message: errorMessage,
+      details: errorStack,
+    });
   }
 }
 

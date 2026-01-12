@@ -40,6 +40,10 @@ export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   Scheduler: DurableObjectNamespace<SchedulerDO>;
   ANTHROPIC_API_KEY: string;
+  // OpenRouter toggle for local testing with alternative models
+  USE_OPENROUTER?: string; // "true" to enable OpenRouter
+  OPENROUTER_API_KEY?: string; // OpenRouter API key
+  OPENROUTER_MODEL?: string; // e.g., "z-ai/glm-4.7"
   SESSIONS: R2Bucket;
   SNAPSHOTS: R2Bucket;
   ANDEE_API_KEY?: string;

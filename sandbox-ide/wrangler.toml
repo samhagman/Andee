@@ -1,8 +1,3 @@
 # Cloudflare Pages configuration for Sandbox IDE
 name = "andee-ide"
-
-# Pages-specific settings are configured via dashboard or wrangler pages commands
-# This file is for reference and future Workers integration if needed
-
-# To deploy:
-# wrangler pages deploy dist --project-name=andee-ide
+pages_build_output_dir = "dist"

@@ -80,7 +80,7 @@ describe("Command Handlers", () => {
       expect(response.status).toBe(200);
     });
 
-    it("calls sandbox worker reset endpoint", async () => {
+    it("calls sandbox worker factory-reset endpoint", async () => {
       // The SANDBOX_WORKER service binding mock is defined in vitest.config.ts
       // We verify behavior through successful response
       const update = createCommandUpdate("new", {

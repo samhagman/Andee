@@ -136,14 +136,33 @@ interface ChatPhotoBuffer {
 const chatPhotoBuffer = new Map<string, ChatPhotoBuffer>();  // Keyed by chatId (string)
 const PHOTO_FLUSH_DELAY_MS = 3000;  // Wait 3s after last photo before flushing
 
-async function resetSandbox(
+async function factoryResetSandbox(
   env: Env,
   chatId: string,
   senderId: string,
   isGroup: boolean
 ): Promise<ResetResponse> {
   const response = await env.SANDBOX_WORKER.fetch(
-    new Request("https://internal/reset", {
+    new Request("https://internal/factory-reset", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || ""
+      },
+      body: JSON.stringify({ chatId, senderId, isGroup })
+    })
+  );
+  return response.json() as Promise<ResetResponse>;
+}
+
+async function restartSandbox(
+  env: Env,
+  chatId: string,
+  senderId: string,
+  isGroup: boolean
+): Promise<ResetResponse> {
+  const response = await env.SANDBOX_WORKER.fetch(
+    new Request("https://internal/restart", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -189,6 +208,33 @@ async function listSnapshots(
     })
   );
   return response.json() as Promise<SnapshotsListResponse>;
+}
+
+interface RestoreResponse {
+  success: boolean;
+  restoredFrom?: string;
+  newSnapshotKey?: string;
+  error?: string;
+}
+
+async function restoreSnapshot(
+  env: Env,
+  chatId: string,
+  senderId: string,
+  isGroup: boolean,
+  snapshotKey: string
+): Promise<RestoreResponse> {
+  const response = await env.SANDBOX_WORKER.fetch(
+    new Request("https://internal/restore", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || ""
+      },
+      body: JSON.stringify({ chatId, senderId, isGroup, snapshotKey })
+    })
+  );
+  return response.json() as Promise<RestoreResponse>;
 }
 
 // Fire-and-forget: Call sandbox worker which will handle everything including sending to Telegram
@@ -533,6 +579,7 @@ export default {
         "- And more!\n\n" +
         "Commands:\n" +
         "/new - Start a fresh conversation\n" +
+        "/restart - Restart container (keeps conversation)\n" +
         "/status - Check session status\n" +
         "/snapshot - Save workspace backup\n" +
         "/snapshots - List saved backups\n" +
@@ -550,8 +597,8 @@ export default {
       const senderId = ctx.from?.id?.toString() || chatId;
       const isGroup = isGroupChat(ctx.chat.type);
 
-      const result = await resetSandbox(env, chatId, senderId, isGroup);
-      await deleteSession(env, chatId, senderId, isGroup);
+      const result = await factoryResetSandbox(env, chatId, senderId, isGroup);
+      // Note: factoryResetSandbox already deletes the session
 
       if (result.snapshotKey) {
         await ctx.reply(
@@ -560,7 +607,31 @@ export default {
           "Use /restore to recover it if needed."
         );
       } else {
-        await ctx.reply("🔄 Started a new conversation! Sandbox reset and context cleared.");
+        await ctx.reply("🔄 Started a new conversation! Session cleared.");
+      }
+    });
+
+    // /restart command - soft restart (keeps conversation)
+    bot.command("restart", async (ctx) => {
+      if (!isUserAllowed(ctx.from?.id)) {
+        await ctx.reply("I'm currently in private testing mode and not available for public use.");
+        return;
+      }
+      const chatId = ctx.chat.id.toString();
+      const senderId = ctx.from?.id?.toString() || chatId;
+      const isGroup = isGroupChat(ctx.chat.type);
+
+      const result = await restartSandbox(env, chatId, senderId, isGroup);
+
+      if (result.snapshotKey) {
+        await ctx.reply(
+          "🔄 Container restarted!\n\n" +
+          "✅ Workspace saved as snapshot\n" +
+          "✅ Conversation preserved\n\n" +
+          "Send a message to continue."
+        );
+      } else {
+        await ctx.reply("🔄 Container restarted. Conversation preserved.");
       }
     });
 
@@ -629,7 +700,7 @@ export default {
       }
     });
 
-    // /restore command - restore from snapshot
+    // /restore command - restore from latest snapshot immediately
     bot.command("restore", async (ctx) => {
       if (!isUserAllowed(ctx.from?.id)) {
         await ctx.reply("I'm currently in private testing mode and not available for public use.");
@@ -647,15 +718,26 @@ export default {
           return;
         }
 
-        // Reset sandbox (this will destroy current state but keep snapshots)
-        // The next message will trigger restore-on-startup
-        await resetSandbox(env, chatId, senderId, isGroup);
-        await deleteSession(env, chatId, senderId, isGroup);
+        // Get the latest snapshot
+        const latestSnapshot = snapshots.snapshots[0];
 
-        await ctx.reply(
-          "🔄 Sandbox reset. The latest snapshot will be restored when you send your next message.\n\n" +
-          "Send any message to continue."
+        await ctx.reply("🔄 Restoring from snapshot...");
+
+        // Actually restore immediately (calls POST /restore)
+        const result = await restoreSnapshot(
+          env, chatId, senderId, isGroup, latestSnapshot.key
         );
+
+        if (result.success) {
+          const timestamp = new Date(latestSnapshot.uploaded).toLocaleString();
+          await ctx.reply(
+            `✅ Restored from snapshot!\n\n` +
+            `📅 Snapshot from: ${timestamp}\n` +
+            `📦 Size: ${Math.round(latestSnapshot.size / 1024)} KB`
+          );
+        } else {
+          await ctx.reply(`❌ Restore failed: ${result.error || "Unknown error"}`);
+        }
       } catch (err) {
         await ctx.reply(`❌ Error: ${err instanceof Error ? err.message : "Unknown error"}`);
       }

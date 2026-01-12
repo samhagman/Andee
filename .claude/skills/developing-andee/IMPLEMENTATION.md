@@ -56,9 +56,10 @@ cd claude-sandbox-worker && npm run dev
 
 The Dockerfile copies skills into `/home/claude/.claude/skills/`.
 
-**For production:** Deploy and reset sandboxes to pick up new skills:
+**For production:** Deploy and restart sandboxes to pick up new skills:
 ```bash
 cd claude-sandbox-worker && npx wrangler deploy
+# Then restart user sandboxes via /restart endpoint (or users can use /new command)
 ```
 
 ---

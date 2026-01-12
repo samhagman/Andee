@@ -137,7 +137,8 @@ async function main() {
     settingSources: ["user"],
     cwd: "/workspace/files",
     model: "claude-sonnet-4-5",
-    maxTurns: 25
+    maxTurns: 25,
+    maxThinkingTokens: 12000
   };
 
   // Add personality prompt if loaded

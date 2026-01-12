@@ -1,7 +1,7 @@
 // File Tree Component
 
-import { listFiles } from "../lib/api";
-import type { FileEntry } from "../lib/types";
+import { listFiles, listSnapshotFiles } from "../lib/api";
+import type { FileEntry, Sandbox } from "../lib/types";
 
 interface TreeNode {
   name: string;
@@ -17,10 +17,15 @@ interface TreeNode {
 export class FileTree {
   private container: HTMLElement;
   private sandboxId: string | null = null;
+  private sandbox: Sandbox | null = null;
   private tree: TreeNode[] = [];
   private onFileSelect: (path: string) => void;
   private selectedPath: string | null = null;
   private currentRoot: string = "/";
+
+  // Preview mode state
+  private previewMode = false;
+  private previewSnapshotKey: string | null = null;
 
   // Quick navigation shortcuts
   private readonly shortcuts = [
@@ -34,6 +39,58 @@ export class FileTree {
     this.container = container;
     this.onFileSelect = onFileSelect;
     this.render();
+  }
+
+  /**
+   * Set the sandbox context.
+   */
+  setSandbox(sandbox: Sandbox): void {
+    this.sandbox = sandbox;
+    this.sandboxId = sandbox.id;
+  }
+
+  /**
+   * Enter preview mode to browse snapshot contents.
+   */
+  async setPreviewMode(snapshotKey: string): Promise<void> {
+    this.previewMode = true;
+    this.previewSnapshotKey = snapshotKey;
+    this.tree = [];
+    this.currentRoot = "/";
+    this.render();
+
+    // Load root directory of snapshot
+    await this.loadDirectory(this.sandboxId!, "/");
+  }
+
+  /**
+   * Exit preview mode and return to live filesystem.
+   */
+  async clearPreviewMode(): Promise<void> {
+    this.previewMode = false;
+    this.previewSnapshotKey = null;
+    this.tree = [];
+    this.currentRoot = "/";
+    this.render();
+
+    // Reload live filesystem
+    if (this.sandboxId) {
+      await this.loadDirectory(this.sandboxId, "/");
+    }
+  }
+
+  /**
+   * Check if in preview mode.
+   */
+  isPreviewMode(): boolean {
+    return this.previewMode;
+  }
+
+  /**
+   * Get current snapshot key (if in preview mode).
+   */
+  getPreviewSnapshotKey(): string | null {
+    return this.previewSnapshotKey;
   }
 
   // Load root directory
@@ -69,6 +126,30 @@ export class FileTree {
   private async fetchDirectory(path: string): Promise<FileEntry[]> {
     if (!this.sandboxId) return [];
 
+    // Use snapshot API in preview mode
+    if (this.previewMode && this.previewSnapshotKey && this.sandbox) {
+      const response = await listSnapshotFiles(
+        this.sandbox,
+        this.previewSnapshotKey,
+        path
+      );
+      // Convert snapshot entries to FileEntry format
+      return response.entries
+        .map((e) => ({
+          name: e.name,
+          type: e.type,
+          size: 0, // Size not available from tar listing
+          modified: "", // Modified not available from tar listing
+        }))
+        .sort((a, b) => {
+          if (a.type !== b.type) {
+            return a.type === "directory" ? -1 : 1;
+          }
+          return a.name.localeCompare(b.name);
+        });
+    }
+
+    // Live filesystem
     const response = await listFiles(this.sandboxId, path);
     // Sort: directories first, then alphabetically
     return response.entries.sort((a, b) => {
@@ -144,6 +225,19 @@ export class FileTree {
   private renderNavBar(): void {
     const navBar = document.createElement("div");
     navBar.className = "file-tree-nav";
+
+    // Header row with refresh button
+    const header = document.createElement("div");
+    header.className = "file-tree-header";
+
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "nav-btn refresh-btn";
+    refreshBtn.innerHTML = "↻ Refresh";
+    refreshBtn.title = "Refresh file list";
+    refreshBtn.addEventListener("click", () => this.refresh());
+    header.appendChild(refreshBtn);
+
+    navBar.appendChild(header);
 
     // Current path display
     const pathDisplay = document.createElement("div");

@@ -4,10 +4,10 @@
  * POST /snapshot      - Create snapshot from sandbox filesystem
  * GET  /snapshot      - Get latest snapshot for a chat
  * GET  /snapshots     - List all snapshots for a chat
- * DELETE /snapshot    - Delete a specific snapshot
+ * POST /restore       - Restore a specific snapshot to the sandbox
  */
 
-import { getSandbox } from "@cloudflare/sandbox";
+import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import {
   CORS_HEADERS,
   HandlerContext,
@@ -16,6 +16,27 @@ import {
   getSnapshotPrefix,
 } from "../types";
 import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+
+/**
+ * Ensures the sandbox is healthy and ready to execute commands.
+ * Uses listProcesses() first (which properly activates the sandbox),
+ * then validates with an exec command.
+ */
+async function ensureSandboxHealthy(sandbox: Sandbox): Promise<boolean> {
+  try {
+    // listProcesses() properly activates a sleeping sandbox
+    // (unlike exec() which fails on stale sessions)
+    const processes = await sandbox.listProcesses();
+    console.log(`[Snapshot] Sandbox has ${processes.length} process(es) running`);
+
+    // Now try a simple exec to confirm the sandbox is responsive
+    const result = await sandbox.exec('echo "alive"', { timeout: 10000 });
+    return result.exitCode === 0;
+  } catch (error) {
+    console.log(`[Snapshot] Sandbox health check failed: ${error}`);
+    return false;
+  }
+}
 
 // Snapshot configuration
 const SNAPSHOT_DIRS = ["/workspace", "/home/claude"];
@@ -245,69 +266,186 @@ export async function handleSnapshotsList(
 }
 
 /**
- * DELETE /snapshot?chatId=X&senderId=Y&isGroup=Z&key=K - Delete a specific snapshot.
- * If key=all, deletes all snapshots for the chat.
- * Returns: { success: true, deleted: number }
+ * Restore request body type.
  */
-export async function handleSnapshotDelete(
+interface RestoreRequest {
+  chatId: string;
+  senderId?: string;
+  isGroup?: boolean;
+  snapshotKey: string;
+  markAsLatest?: boolean;
+}
+
+/**
+ * POST /restore - Restore a specific snapshot to the sandbox.
+ * Body: { chatId, senderId, isGroup, snapshotKey, markAsLatest? }
+ *
+ * Process:
+ * 1. Validate snapshot access
+ * 2. Kill all user processes
+ * 3. Clear /workspace and /home/claude directories
+ * 4. Download and extract snapshot
+ * 5. Optionally create new snapshot (markAsLatest)
+ */
+export async function handleSnapshotRestore(
   ctx: HandlerContext
 ): Promise<Response> {
   try {
-    const chatId = ctx.url.searchParams.get("chatId");
-    const senderId = ctx.url.searchParams.get("senderId") || undefined;
-    const isGroup = ctx.url.searchParams.get("isGroup") === "true" ? true :
-                    ctx.url.searchParams.get("isGroup") === "false" ? false : undefined;
-    const key = ctx.url.searchParams.get("key");
+    const body = (await ctx.request.json()) as RestoreRequest;
+    const { chatId, senderId, isGroup, snapshotKey, markAsLatest } = body;
 
-    if (!chatId) {
+    if (!chatId || !snapshotKey) {
       return Response.json(
-        { error: "Missing chatId query parameter" },
+        { error: "Missing chatId or snapshotKey" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
 
+    // Validate snapshot access
     const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
-
-    if (key === "all") {
-      // Delete all snapshots for this chat
-      const listResult = await ctx.env.SNAPSHOTS.list({ prefix });
-
-      const deletePromises = listResult.objects.map((obj) =>
-        ctx.env.SNAPSHOTS.delete(obj.key)
-      );
-      await Promise.all(deletePromises);
-
-      console.log(
-        `[Snapshot] Deleted ${listResult.objects.length} snapshots for chat ${chatId}`
-      );
-
+    if (!snapshotKey.startsWith(prefix)) {
       return Response.json(
-        { success: true, deleted: listResult.objects.length },
-        { headers: CORS_HEADERS }
-      );
-    }
-
-    if (!key) {
-      return Response.json(
-        { error: "Missing key query parameter (use key=all to delete all)" },
-        { status: 400, headers: CORS_HEADERS }
-      );
-    }
-
-    // Verify the key belongs to this chat (matches the expected prefix)
-    if (!key.startsWith(prefix)) {
-      return Response.json(
-        { error: "Invalid key for this chatId/senderId/isGroup combination" },
+        { error: "Access denied to this snapshot" },
         { status: 403, headers: CORS_HEADERS }
       );
     }
 
-    await ctx.env.SNAPSHOTS.delete(key);
-    console.log(`[Snapshot] Deleted snapshot: ${key}`);
+    console.log(`[Snapshot] Restoring snapshot for chat ${chatId}: ${snapshotKey}`);
 
-    return Response.json({ success: true, deleted: 1 }, { headers: CORS_HEADERS });
+    // Get sandbox reference
+    const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
+      sleepAfter: SANDBOX_SLEEP_AFTER,
+    });
+
+    // Step 1: Download snapshot from R2 first (doesn't need sandbox)
+    console.log(`[Snapshot] Downloading snapshot from R2...`);
+    const object = await ctx.env.SNAPSHOTS.get(snapshotKey);
+
+    if (!object) {
+      return Response.json(
+        { error: "Snapshot not found in R2", snapshotKey },
+        { status: 404, headers: CORS_HEADERS }
+      );
+    }
+
+    const arrayBuffer = await object.arrayBuffer();
+    console.log(`[Snapshot] Downloaded ${arrayBuffer.byteLength} bytes from R2`);
+
+    // Step 2: Wake up the sandbox with a health check
+    console.log(`[Snapshot] Ensuring sandbox is awake...`);
+    const isHealthy = await ensureSandboxHealthy(sandbox);
+    if (!isHealthy) {
+      console.log(`[Snapshot] Sandbox not healthy, attempting to wake...`);
+      // Try once more - the first call may have woken it
+      const retry = await ensureSandboxHealthy(sandbox);
+      if (!retry) {
+        return Response.json(
+          { error: "Unable to wake sandbox for restore" },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+
+    // Step 3: Write snapshot to container using SDK's writeFile (same approach as ask.ts)
+    // The SDK handles base64 encoding internally
+    console.log(`[Snapshot] Writing snapshot to container (${arrayBuffer.byteLength} bytes)...`);
+    const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+    try {
+      await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
+        encoding: "base64",
+      });
+      console.log(`[Snapshot] Snapshot file written successfully`);
+    } catch (writeError) {
+      console.error(`[Snapshot] Failed to write snapshot file:`, writeError);
+      return Response.json(
+        { error: "Failed to write snapshot to container", detail: String(writeError) },
+        { status: 500, headers: CORS_HEADERS }
+      );
+    }
+
+    // Step 4: Clear directories and extract in sequence
+    console.log(`[Snapshot] Clearing directories and extracting...`);
+    const clearCmd = SNAPSHOT_DIRS.map(dir => `rm -rf ${dir}/* ${dir}/.[!.]* 2>/dev/null`).join("; ");
+    const restoreResult = await sandbox.exec(
+      `${clearCmd}; cd / && tar -xzf ${SNAPSHOT_TMP_PATH} && rm -f ${SNAPSHOT_TMP_PATH}`,
+      { timeout: TAR_TIMEOUT_MS }
+    );
+
+    if (restoreResult.exitCode !== 0) {
+      console.error(`[Snapshot] Restore failed: ${restoreResult.stderr}`);
+      return Response.json(
+        { error: "Failed to restore snapshot", detail: restoreResult.stderr },
+        { status: 500, headers: CORS_HEADERS }
+      );
+    }
+
+    console.log(`[Snapshot] Restore complete for chat ${chatId}`);
+
+    // Step 5: Optionally create new snapshot to mark as latest
+    let newSnapshotKey: string | undefined;
+    if (markAsLatest) {
+      console.log(`[Snapshot] Creating new snapshot to mark as latest...`);
+
+      // Check which directories have content
+      const dirsToBackup: string[] = [];
+      for (const dir of SNAPSHOT_DIRS) {
+        const checkResult = await sandbox.exec(`test -d ${dir} && ls -A ${dir}`, {
+          timeout: 5000,
+        });
+        if (checkResult.exitCode === 0 && checkResult.stdout.trim()) {
+          dirsToBackup.push(dir);
+        }
+      }
+
+      if (dirsToBackup.length > 0) {
+        // Create tar archive
+        const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${dirsToBackup.join(" ")} 2>/dev/null`;
+        const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
+
+        if (tarResult.exitCode === 0) {
+          // Read and upload
+          const tarFile = await sandbox.readFile(SNAPSHOT_TMP_PATH, {
+            encoding: "base64",
+          });
+
+          if (tarFile.content) {
+            const binaryData = Uint8Array.from(atob(tarFile.content), (c) =>
+              c.charCodeAt(0)
+            );
+
+            newSnapshotKey = getSnapshotKey(chatId, senderId, isGroup);
+            await ctx.env.SNAPSHOTS.put(newSnapshotKey, binaryData, {
+              customMetadata: {
+                chatId,
+                senderId: senderId || "",
+                isGroup: String(isGroup),
+                createdAt: new Date().toISOString(),
+                directories: dirsToBackup.join(","),
+                reason: "restore-mark-latest",
+                restoredFrom: snapshotKey,
+              },
+            });
+
+            console.log(`[Snapshot] Created new snapshot: ${newSnapshotKey}`);
+          }
+        }
+
+        // Clean up
+        await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
+      }
+    }
+
+    return Response.json(
+      {
+        success: true,
+        restoredFrom: snapshotKey,
+        newSnapshotKey,
+      },
+      { headers: CORS_HEADERS }
+    );
   } catch (error) {
-    console.error("[Snapshot] Delete error:", error);
+    console.error("[Snapshot] Restore error:", error);
     return Response.json(
       { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500, headers: CORS_HEADERS }

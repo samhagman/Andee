@@ -35,8 +35,11 @@ export default defineWorkersConfig({
             SANDBOX_WORKER: async (request: Request) => {
               // Return mock response for all sandbox worker calls
               const url = new URL(request.url);
-              if (url.pathname === "/reset") {
-                return new Response(JSON.stringify({ success: true }));
+              if (url.pathname === "/factory-reset") {
+                return new Response(JSON.stringify({ success: true, sessionPreserved: false }));
+              }
+              if (url.pathname === "/restart") {
+                return new Response(JSON.stringify({ success: true, sessionPreserved: true }));
               }
               if (url.pathname === "/ask") {
                 return new Response(JSON.stringify({ ok: true }));
@@ -46,6 +49,9 @@ export default defineWorkersConfig({
               }
               if (url.pathname === "/snapshots") {
                 return new Response(JSON.stringify({ count: 0, snapshots: [] }));
+              }
+              if (url.pathname === "/restore") {
+                return new Response(JSON.stringify({ success: true, restoredFrom: "test-snapshot" }));
               }
               return new Response(JSON.stringify({ ok: true }));
             },
