@@ -19,6 +19,7 @@ import {
   QUICK_COMMAND_TIMEOUT_MS,
   CURL_TIMEOUT_MS,
   SERVER_STARTUP_TIMEOUT_MS,
+  GOOSE_TIMEOUT_MS,
 } from "../../../shared/config";
 import { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT } from "../scripts";
 import {
@@ -26,6 +27,13 @@ import {
   saveAllMedia,
   type MediaStorageResult,
 } from "../lib/media";
+import {
+  buildGooseEnv,
+  generateSystemPrompt,
+  filterGooseResponse,
+  sendToTelegram,
+  sendErrorToTelegram,
+} from "../lib/goose";
 
 // Snapshot configuration
 const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
@@ -176,7 +184,8 @@ async function transcribeAudio(
 }
 
 export async function handleAsk(
-  ctx: HandlerContext
+  ctx: HandlerContext,
+  forceEngine?: "goose" | "claude"
 ): Promise<Response> {
   try {
     const body = (await ctx.request.json()) as AskTelegramRequest;
@@ -309,6 +318,118 @@ export async function handleAsk(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "typing" }),
     }).catch(() => {});
+
+    // ===============================================================
+    // GOOSE EXECUTION PATH (USE_GOOSE=true)
+    // ===============================================================
+    // ENGINE SELECTION: Goose CLI vs Claude SDK
+    // Priority: forceEngine param > USE_GOOSE env var
+    // ===============================================================
+    const useGoose = forceEngine === "goose" || (forceEngine !== "claude" && ctx.env.USE_GOOSE === "true");
+
+    if (useGoose) {
+      console.log(`[${chatId}] Using Goose CLI path (GLM-4.7)${forceEngine ? ` [forced: ${forceEngine}]` : ""}`);
+
+      // Restore from snapshot if container is fresh
+      const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
+      if (restored) {
+        console.log(`[Worker] Filesystem restored from snapshot for chat ${chatId}`);
+      }
+
+      // Read user timezone from preferences
+      let userTimezone = "UTC";
+      if (senderId) {
+        const prefsPath = `/home/claude/private/${senderId}/preferences.yaml`;
+        const prefsResult = await sandbox.exec(
+          `cat ${prefsPath} 2>/dev/null || echo ""`,
+          { timeout: QUICK_COMMAND_TIMEOUT_MS }
+        );
+        if (prefsResult.stdout.includes("timezone:")) {
+          const match = prefsResult.stdout.match(/timezone:\s*([^\n]+)/);
+          if (match) {
+            userTimezone = match[1].trim();
+            console.log(`[Worker] User ${senderId} timezone: ${userTimezone}`);
+          }
+        }
+      }
+
+      // Load personality
+      const personalityResult = await sandbox.exec(
+        "cat /home/claude/.claude/PERSONALITY.md 2>/dev/null || echo ''",
+        { timeout: QUICK_COMMAND_TIMEOUT_MS }
+      );
+      const personality = personalityResult.stdout || "";
+
+      // Generate system prompt
+      const systemPrompt = generateSystemPrompt(personality, chatId, senderId || "unknown");
+
+      // Note: finalMessage is guaranteed to be defined here because:
+      // - Either message was provided, or
+      // - Audio was transcribed, or
+      // - Images/document were sent (for which we use a default prompt)
+      const messageToSend = finalMessage || "Describe what you see in the attached media.";
+
+      // Escape for shell (single quotes with escaped single quotes)
+      const escapeForShell = (s: string) => s.replace(/'/g, "'\\''");
+      const escapedSystem = escapeForShell(systemPrompt);
+      const escapedMessage = escapeForShell(messageToSend);
+
+      // Execute Goose with --system for personality and -t for user message
+      const gooseCmd = `goose run --system '${escapedSystem}' -t '${escapedMessage}' --no-session -q`;
+      console.log(`[${chatId}] Running Goose (${messageToSend.length} char message)`);
+
+      const gooseResult = await sandbox.exec(gooseCmd, {
+        timeout: GOOSE_TIMEOUT_MS,
+        env: buildGooseEnv(ctx.env, userTimezone),
+      });
+
+      if (gooseResult.exitCode !== 0) {
+        console.error(`[${chatId}] Goose error (exit ${gooseResult.exitCode}): ${gooseResult.stderr}`);
+        await sendErrorToTelegram(botToken, chatId, gooseResult.stderr || "Goose execution failed");
+        return Response.json(
+          { error: gooseResult.stderr || "Goose execution failed" },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+
+      // Filter and send response
+      const response = filterGooseResponse(gooseResult.stdout);
+      console.log(`[${chatId}] Goose response (${response.length} chars): ${response.substring(0, 100)}...`);
+
+      if (response) {
+        await sendToTelegram(response, botToken, chatId);
+        console.log(`[${chatId}] Sent Goose response to Telegram`);
+      } else {
+        console.warn(`[${chatId}] Goose returned empty response`);
+      }
+
+      // TODO: Append to memvid (requires porting memvid logic from persistent server)
+      // For now, memvid is handled by Goose via tools if needed
+
+      // Trigger async snapshot
+      // Note: This is fire-and-forget, similar to current behavior
+      const snapshotBody = JSON.stringify({
+        chatId,
+        senderId,
+        isGroup,
+      });
+      fetch(`${ctx.request.url.replace(/\/ask$/, "/snapshot")}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": ctx.env.ANDEE_API_KEY || "",
+        },
+        body: snapshotBody,
+      }).catch((err) => console.error(`[${chatId}] Async snapshot failed:`, err));
+
+      return Response.json({ started: true, chatId, engine: "goose" }, { headers: CORS_HEADERS });
+    }
+
+    // ===============================================================
+    // CLAUDE SDK EXECUTION PATH (USE_GOOSE=false or unset)
+    // Uses persistent server with Claude Agent SDK
+    // ===============================================================
+    console.log(`[${chatId}] Using Claude SDK path (Sonnet 4.5)${forceEngine ? ` [forced: ${forceEngine}]` : ""}`);
 
     // Service bindings use "internal" hostname which isn't resolvable from containers
     // Use production URL when hostname is "internal", otherwise derive from request

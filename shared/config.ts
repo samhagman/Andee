@@ -74,6 +74,31 @@ export const QUICK_COMMAND_TIMEOUT_MS = 5_000;
 export const CURL_TIMEOUT_MS = 10_000;
 
 // ============================================================================
+// Goose Configuration (GLM-4.7 Migration)
+// ============================================================================
+
+/**
+ * Timeout for Goose CLI execution (in milliseconds).
+ * Same as agent timeout but explicitly for Goose.
+ */
+export const GOOSE_TIMEOUT_MS = 120_000;
+
+/**
+ * Model name for GLM-4.7 on Cerebras.
+ */
+export const GOOSE_MODEL = "zai-glm-4.7";
+
+/**
+ * Cerebras API base URL.
+ */
+export const GOOSE_PROVIDER_URL = "https://api.cerebras.ai";
+
+/**
+ * Max turns for Goose execution.
+ */
+export const GOOSE_MAX_TURNS = 25;
+
+// ============================================================================
 // Paths
 // ============================================================================
 

@@ -1,11 +1,24 @@
 # Base image with Node.js and sandbox runtime
 FROM docker.io/cloudflare/sandbox:0.6.7
 
-# Install Claude Code CLI (required runtime for Agent SDK)
+# Install Claude Code CLI (required runtime for Agent SDK - kept for USE_GOOSE=false fallback)
 RUN npm install -g @anthropic-ai/claude-code
 
-# Install Agent SDK globally for the agent script
+# Install Agent SDK globally for the agent script (kept for USE_GOOSE=false fallback)
 RUN npm install -g @anthropic-ai/claude-agent-sdk
+
+# Install bzip2 (required to extract Goose CLI tarball)
+RUN apt-get update && apt-get install -y bzip2 && rm -rf /var/lib/apt/lists/*
+
+# Install Goose CLI for GLM-4.7 migration (USE_GOOSE=true path)
+# Downloads and installs the Goose binary from Block's releases
+# CONFIGURE=false skips interactive setup (we configure via env vars)
+RUN curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash && \
+    mv /root/.local/bin/goose /usr/local/bin/goose && \
+    goose --version
+
+# Install Perplexity MCP server for web search capability (used by Goose)
+RUN npm install -g server-perplexity-ask
 
 # Install build dependencies for native node modules (node-pty requires compilation)
 RUN apt-get update && apt-get install -y build-essential python3 && rm -rf /var/lib/apt/lists/*
@@ -44,6 +57,9 @@ RUN ln -s /usr/local/lib/node_modules /workspace/node_modules
 # Create .claude directory for the user
 RUN mkdir -p /home/claude/.claude && chown -R claude:claude /home/claude/.claude
 
+# Create .goose config directory for Goose MCP configuration
+RUN mkdir -p /home/claude/.config/goose && chown -R claude:claude /home/claude/.config/goose
+
 # Pre-create memory directory structure (for artifacts and conversation memory)
 RUN mkdir -p /home/claude/shared/lists \
     && mkdir -p /home/claude/private \
@@ -76,6 +92,11 @@ COPY --chown=claude:claude CLAUDE.md /workspace/CLAUDE.md
 
 # Copy PERSONALITY.md for personality/style prompt (loaded by agent scripts)
 COPY --chown=claude:claude .claude/PERSONALITY.md /home/claude/.claude/PERSONALITY.md
+
+# Copy Goose configuration (extensions + MCP servers)
+# config.yaml enables developer and skills extensions
+# mcp.json configures Perplexity for web search
+COPY --chown=claude:claude .goose/ /home/claude/.config/goose/
 
 # Expose port 8080 for persistent server (3000 is used by Sandbox infrastructure)
 # Expose port 8081 for ttyd web terminal (used by Sandbox IDE)

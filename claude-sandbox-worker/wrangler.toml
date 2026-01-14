@@ -25,6 +25,18 @@ port = 8787
 # Set DEBUG=true to enable verbose debug logging (visible in wrangler tail)
 [vars]
 DEBUG = "false"
+# Set USE_GOOSE=true to use Goose CLI with GLM-4.7 instead of Claude SDK
+# This enables the GLM-4.7 migration path via Cerebras inference
+USE_GOOSE = "false"
+
+# Secrets (set via: npx wrangler secret put <SECRET_NAME>)
+# ANTHROPIC_API_KEY     - Required for Claude SDK path (USE_GOOSE=false)
+# CEREBRAS_API_KEY      - Required for Goose path (USE_GOOSE=true)
+# PERPLEXITY_API_KEY    - Required for web search MCP (USE_GOOSE=true)
+# ANDEE_API_KEY         - API key for authenticating requests
+# AWS_ACCESS_KEY_ID     - For R2 bucket mounting
+# AWS_SECRET_ACCESS_KEY - For R2 bucket mounting
+# CLOUDFLARE_ACCOUNT_ID - For R2 bucket mounting
 
 # Durable Object bindings
 [durable_objects]

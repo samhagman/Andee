@@ -1,0 +1,16 @@
+# Goose configuration for Andee
+# Extensions enabled for tool use
+
+extensions:
+  developer:
+    bundled: true
+    enabled: true
+    name: developer
+    timeout: 300
+    type: builtin
+  skills:
+    bundled: true
+    enabled: true
+    name: skills
+    timeout: 300
+    type: builtin

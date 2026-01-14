@@ -163,6 +163,20 @@ export default {
         }
         break;
 
+      // Force Goose CLI path (for A/B testing without changing env vars)
+      case "/ask/goose":
+        if (request.method === "POST") {
+          return handleAsk(ctx, "goose");
+        }
+        break;
+
+      // Force Claude SDK path (for A/B testing without changing env vars)
+      case "/ask/claude":
+        if (request.method === "POST") {
+          return handleAsk(ctx, "claude");
+        }
+        break;
+
       case "/restart":
         if (request.method === "POST") {
           return handleRestart(ctx);
