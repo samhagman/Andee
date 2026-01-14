@@ -3,58 +3,88 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Weather Report</title>
+  <title>Weather</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="../lib/base.css">
 </head>
 <body>
-  <div id="app">
-    <div class="header">
-      <div class="location" id="location">Loading...</div>
-      <button class="unit-toggle" id="unit-toggle">C / F</button>
-    </div>
+  <div id="app" class="metro-grid-dashboard">
+    <!-- Header: Minimal -->
+    <header class="metro-header">
+      <div class="location-time" id="location-time">Loading...</div>
+    </header>
 
-    <div class="current-card">
-      <div class="weather-icon" id="current-icon"></div>
-      <div class="current-temp">
-        <span id="current-temp-primary">--</span><span id="current-temp-secondary" class="current-temp-secondary"></span>
+    <!-- Hero Section: Current Weather -->
+    <section class="hero-section" id="hero-section">
+      <div class="current-temp-display">
+        <div class="temp-value" id="temp-value">--</div>
+        <div class="temp-condition" id="temp-condition">--</div>
+        <div class="feels-like" id="feels-like">--</div>
       </div>
-      <div class="feels-like" id="feels-like">Feels like --</div>
-    </div>
+    </section>
 
-    <div class="range-card">
-      <div class="range-title">Today's Range</div>
-      <div class="range-temps">
-        <div class="range-item">
-          <div class="range-label">Low</div>
-          <div class="range-value" id="range-low">--</div>
-          <div class="range-secondary" id="range-low-alt"></div>
-        </div>
-        <div class="range-divider">~</div>
-        <div class="range-item">
-          <div class="range-label">High</div>
-          <div class="range-value" id="range-high">--</div>
-          <div class="range-secondary" id="range-high-alt"></div>
-        </div>
+    <!-- Metro Grid: 5 Key Metrics -->
+    <section class="metro-grid" id="metro-grid">
+      <!-- Wind tile -->
+      <div class="metric-tile" id="tile-wind">
+        <div class="metric-icon">💨</div>
+        <div class="metric-value" id="wind-value">--</div>
+        <div class="metric-label">Wind</div>
+        <div class="metric-detail" id="wind-detail"></div>
       </div>
-    </div>
 
-    <div class="transitions-card" id="transitions-card">
-      <div class="section-title">Weather Changes</div>
-      <div id="transitions-container"></div>
-    </div>
+      <!-- Humidity tile -->
+      <div class="metric-tile" id="tile-humidity">
+        <div class="metric-icon">💧</div>
+        <div class="metric-value" id="humidity-value">--</div>
+        <div class="metric-label">Humidity</div>
+        <div class="metric-detail" id="humidity-detail"></div>
+      </div>
 
-    <div class="hourly-section">
-      <div class="section-title">Hourly Forecast</div>
-      <div class="hourly-scroll" id="hourly-container"></div>
-    </div>
+      <!-- Pressure tile -->
+      <div class="metric-tile" id="tile-pressure">
+        <div class="metric-icon">⬇️</div>
+        <div class="metric-value" id="pressure-value">--</div>
+        <div class="metric-label">Pressure</div>
+        <div class="metric-detail" id="pressure-detail"></div>
+      </div>
 
-    <div class="recommendations" id="recommendations">
-      <div class="section-title">Recommendations</div>
-      <div id="rec-container"></div>
-    </div>
+      <!-- Visibility tile -->
+      <div class="metric-tile" id="tile-visibility">
+        <div class="metric-icon">👁️</div>
+        <div class="metric-value" id="visibility-value">--</div>
+        <div class="metric-label">Visibility</div>
+        <div class="metric-detail" id="visibility-detail"></div>
+      </div>
 
-    <div class="generated-at" id="generated-at"></div>
+      <!-- Sparkline tile (spans 2 columns on desktop, 1 on mobile) -->
+      <div class="metric-tile sparkline-tile" id="tile-sparkline">
+        <svg class="sparkline-chart" id="sparkline-chart" viewBox="0 0 200 60" preserveAspectRatio="none">
+          <polyline class="sparkline-line" id="sparkline-polyline" points="" />
+        </svg>
+        <div class="sparkline-label">24h Trend</div>
+      </div>
+    </section>
+
+    <!-- Range and Next 3 Hours -->
+    <section class="secondary-grid" id="secondary-grid">
+      <!-- Temperature range -->
+      <div class="range-band" id="range-band">
+        <span class="range-low" id="range-low">--</span>
+        <span class="range-bar"></span>
+        <span class="range-high" id="range-high">--</span>
+      </div>
+
+      <!-- Next 3 hours -->
+      <div class="outlook-strip" id="outlook-strip">
+        <!-- Populated by main.ts -->
+      </div>
+    </section>
+
+    <!-- Alert Zone: Critical Recommendations -->
+    <section class="alert-zone" id="alert-zone" style="display: none;">
+      <!-- Populated by main.ts if alerts exist -->
+    </section>
   </div>
 
   <script type="module" src="./main.ts"></script>

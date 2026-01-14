@@ -4,6 +4,7 @@
 
 import type { Sandbox } from "@cloudflare/sandbox";
 import type { SchedulerDO } from "./scheduler/SchedulerDO";
+import type { RecurringSchedulesDO } from "./scheduler/RecurringSchedulesDO";
 
 // Re-export shared types for convenience
 export type {
@@ -23,6 +24,18 @@ export type {
   ListRemindersRequest,
   ReminderResponse,
   ListRemindersResponse,
+  // Schedule types
+  ScheduleConfig,
+  RecurringSchedule,
+  ScheduleWithNextRun,
+  ScheduleExecution,
+  ScheduleExecutionStatus,
+  SaveScheduleConfigRequest,
+  ExecuteScheduleRequest,
+  ScheduledTaskRequest,
+  ScheduleResponse,
+  GetScheduleConfigResponse,
+  ListExecutionsResponse,
 } from "../../shared";
 
 export {
@@ -31,6 +44,8 @@ export {
   getSnapshotKey,
   getSnapshotPrefix,
   getSchedulerDOId,
+  getRecurringSchedulesDOId,
+  getScheduleConfigKey,
 } from "../../shared";
 
 /**
@@ -39,6 +54,7 @@ export {
 export interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   Scheduler: DurableObjectNamespace<SchedulerDO>;
+  RecurringSchedules: DurableObjectNamespace<RecurringSchedulesDO>;
   ANTHROPIC_API_KEY: string;
   // OpenRouter toggle for local testing with alternative models
   USE_OPENROUTER?: string; // "true" to enable OpenRouter

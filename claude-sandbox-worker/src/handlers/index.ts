@@ -36,3 +36,13 @@ export {
   clearTerminalUrlCache,
   clearAllTerminalUrlCaches,
 } from "./ide";
+export {
+  handleGetScheduleConfig,
+  handleSaveScheduleConfig,
+  handleListScheduleRuns,
+  handleRunScheduleNow,
+  handleToggleSchedule,
+  handleGetScheduleConfigYaml,
+  handleSaveScheduleConfigYaml,
+} from "./schedules";
+export { handleScheduledTask } from "./scheduled-task";

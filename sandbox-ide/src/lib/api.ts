@@ -12,6 +12,11 @@ import type {
   SnapshotFileResponse,
   RestoreRequest,
   RestoreResponse,
+  GetScheduleConfigResponse,
+  SaveScheduleConfigResponse,
+  ListScheduleRunsResponse,
+  RunScheduleNowResponse,
+  ScheduleConfig,
 } from "./types";
 
 const DEV_WORKER_URL = "http://localhost:8787";
@@ -205,6 +210,141 @@ export async function restartSandbox(
       chatId: sandbox.chatId,
       senderId: sandbox.senderId,
       isGroup: sandbox.isGroup,
+    }),
+  });
+}
+
+// ============ Schedule API Functions ============
+
+// Get schedule config for a sandbox
+export async function getScheduleConfig(
+  sandbox: Sandbox
+): Promise<GetScheduleConfigResponse> {
+  const params = new URLSearchParams({
+    chatId: sandbox.chatId,
+  });
+  return fetchApi<GetScheduleConfigResponse>(`/schedule-config?${params}`);
+}
+
+// Save schedule config for a sandbox
+export async function saveScheduleConfig(
+  sandbox: Sandbox,
+  config: ScheduleConfig,
+  botToken: string
+): Promise<SaveScheduleConfigResponse> {
+  return fetchApi<SaveScheduleConfigResponse>("/schedule-config", {
+    method: "PUT",
+    body: JSON.stringify({
+      chatId: sandbox.chatId,
+      config,
+      botToken,
+    }),
+  });
+}
+
+// Get raw YAML config for editing
+export async function getScheduleConfigYaml(
+  sandbox: Sandbox
+): Promise<string> {
+  const params = new URLSearchParams({
+    chatId: sandbox.chatId,
+  });
+  const url = `${getWorkerUrl()}/schedule-config-yaml?${params}`;
+  const apiKey = getApiKey();
+
+  const response = await fetch(url, {
+    headers: {
+      "X-API-Key": apiKey,
+    },
+  });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new Error("Unauthorized - invalid API key");
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to get schedule config: ${response.status}`);
+  }
+
+  return response.text();
+}
+
+// Save raw YAML config
+export async function saveScheduleConfigYaml(
+  sandbox: Sandbox,
+  yaml: string,
+  botToken: string
+): Promise<SaveScheduleConfigResponse> {
+  const params = new URLSearchParams({
+    chatId: sandbox.chatId,
+    botToken,
+  });
+  const url = `${getWorkerUrl()}/schedule-config-yaml?${params}`;
+  const apiKey = getApiKey();
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "text/yaml",
+      "X-API-Key": apiKey,
+    },
+    body: yaml,
+  });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new Error("Unauthorized - invalid API key");
+  }
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to save schedule config: ${error}`);
+  }
+
+  return response.json();
+}
+
+// List schedule execution history
+export async function listScheduleRuns(
+  sandbox: Sandbox,
+  scheduleId?: string,
+  limit?: number
+): Promise<ListScheduleRunsResponse> {
+  const params = new URLSearchParams({
+    chatId: sandbox.chatId,
+  });
+  if (scheduleId) params.append("scheduleId", scheduleId);
+  if (limit) params.append("limit", String(limit));
+  return fetchApi<ListScheduleRunsResponse>(`/schedule-runs?${params}`);
+}
+
+// Run a schedule immediately (for testing)
+export async function runScheduleNow(
+  sandbox: Sandbox,
+  scheduleId: string
+): Promise<RunScheduleNowResponse> {
+  return fetchApi<RunScheduleNowResponse>("/run-schedule-now", {
+    method: "POST",
+    body: JSON.stringify({
+      chatId: sandbox.chatId,
+      scheduleId,
+    }),
+  });
+}
+
+// Toggle a schedule on/off
+export async function toggleSchedule(
+  sandbox: Sandbox,
+  scheduleId: string,
+  enabled: boolean
+): Promise<{ success: boolean; error?: string }> {
+  return fetchApi<{ success: boolean; error?: string }>("/toggle-schedule", {
+    method: "POST",
+    body: JSON.stringify({
+      chatId: sandbox.chatId,
+      scheduleId,
+      enabled,
     }),
   });
 }

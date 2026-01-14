@@ -6,6 +6,7 @@ import { FileTree } from "./components/FileTree";
 import { Editor } from "./components/Editor";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { SnapshotPanel } from "./components/SnapshotPanel";
+import { SchedulesPanel } from "./components/SchedulesPanel";
 import { PreviewBanner } from "./components/PreviewBanner";
 import { showConfirmModal } from "./components/ConfirmModal";
 import { showErrorModal } from "./components/ErrorModal";
@@ -29,6 +30,7 @@ let fileTree: FileTree | null = null;
 let editor: Editor | null = null;
 let statusIndicator: StatusIndicator | null = null;
 let snapshotPanel: SnapshotPanel | null = null;
+let schedulesPanel: SchedulesPanel | null = null;
 let previewBanner: PreviewBanner | null = null;
 
 // Preview mode state
@@ -63,6 +65,16 @@ async function init() {
     snapshotPanel = new SnapshotPanel(snapshotContainer, {
       onPreview: handleEnterPreview,
       onRestore: handleRestore,
+    });
+  }
+
+  // Initialize schedules panel
+  const schedulesContainer = document.getElementById("schedules-panel");
+  if (schedulesContainer) {
+    schedulesPanel = new SchedulesPanel(schedulesContainer, {
+      onScheduleRun: (scheduleId) => {
+        console.log(`[IDE] Schedule triggered: ${scheduleId}`);
+      },
     });
   }
 
@@ -111,6 +123,11 @@ function handleSandboxChange(sandbox: Sandbox) {
   // Update snapshot panel
   if (snapshotPanel) {
     snapshotPanel.setSandbox(sandbox);
+  }
+
+  // Update schedules panel
+  if (schedulesPanel) {
+    schedulesPanel.setSandbox(sandbox);
   }
 
   // Update file tree

@@ -26,7 +26,7 @@ Andee is a Claude agent running in Cloudflare's sandbox environment. This docume
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              USER INTERACTION                               │
-│                     (Alice, Bob, or shared "us" context)                    │
+│                      (via Telegram - private or group chats)                │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -44,24 +44,21 @@ Andee is a Claude agent running in Cloudflare's sandbox environment. This docume
 ┌───────────────────────┐ ┌───────────────────┐ ┌───────────────────────────┐
 │   MEMVID (.mv2)       │ │  SANDBOX FILESYSTEM│ │   CLOUDFLARE AI SEARCH   │
 │   Conversation Memory │ │  Artifact Storage  │ │   Cross-File Semantic    │
-│                       │ │                    │ │                          │
-│ • Hybrid search       │ │ /home/claude/       │ │ • Indexes R2 snapshots   │
-│ • Append-only         │ │ ├── memories/      │ │ • Semantic search        │
-│ • Per-user + shared   │ │ │   ├── alice.mv2  │ │ • ~30ms latency          │
-│ • Sub-5ms retrieval   │ │ │   ├── bob.mv2    │ │ • Auto-reindex           │
-│                       │ │ │   └── shared.mv2 │ │                          │
-│ alice.mv2             │ │ ├── shared/        │ │ Points to:               │
-│ bob.mv2               │ │ │   └── lists/     │ │ r2://andee-snapshots/    │
-│ shared.mv2            │ │ │       ├── MENU.JSON   │     latest/           │
-│                       │ │ │       ├── recipes/                            │
-│                       │ │ │       │   ├── pasta-carbonara-a1b2.md         │
-│                       │ │ │       │   └── thai-curry-c3d4.md              │
-│                       │ │ │       ├── grocery/                            │
-│                       │ │ │       │   └── weekly-groceries-e5f6.md        │
+│                       │ │                    │ │   (Future Enhancement)   │
+│ STORED IN R2:         │ │                    │ │                          │
+│ /media/conversation-  │ │ /home/claude/      │ │ • Indexes R2 snapshots   │
+│   history/{chatId}/   │ │ ├── shared/        │ │ • Semantic search        │
+│   memory.mv2          │ │ │   └── lists/     │ │ • ~30ms latency          │
+│                       │ │ │       ├── MENU.JSON                          │
+│ • Hybrid search       │ │ │       ├── recipes/                            │
+│ • Append-only         │ │ │       │   ├── pasta-carbonara-a1b2.md         │
+│ • Per-chat (by chatId)│ │ │       │   └── thai-curry-c3d4.md              │
+│ • Sub-5ms retrieval   │ │ │       ├── grocery/                            │
+│ • R2-mounted storage  │ │ │       │   └── weekly-groceries-e5f6.md        │
 │                       │ │ │       └── movies/                             │
-│                       │ │ │           └── to-watch-g7h8.md                │
-│                       │ │ └── secret/        │ │                          │
-│                       │ │     └── alice/     │ │                          │
+│ Embedding models:     │ │ │           └── to-watch-g7h8.md                │
+│ /media/.memvid/models/│ │ └── private/       │ │                          │
+│ (shared across chats) │ │     └── {senderId}/│ │                          │
 │                       │ │         └── lists/ │ │                          │
 │                       │ │             ├── MENU.JSON                       │
 │                       │ │             └── ...│ │                          │
@@ -69,12 +66,17 @@ Andee is a Claude agent running in Cloudflare's sandbox environment. This docume
                                    │
                                    ▼ (automatic)
                           ┌───────────────────┐
-                          │   R2 SNAPSHOTS    │
+                          │   R2 STORAGE      │
+                          │                   │
+                          │ conversation-     │
+                          │ history/          │◄── Memvid files (persistent)
+                          │ ├── {chatId}/     │
+                          │ │   └── memory.mv2│
+                          │ └── .memvid/      │
+                          │     └── models/   │◄── Embedding models (shared)
                           │                   │
                           │ andee-snapshots/  │
-                          │ ├── latest/       │◄── AI Search indexes this
-                          │ ├── 2026-01-06/   │
-                          │ └── ...           │
+                          │ └── snapshots/... │◄── Filesystem backups
                           └───────────────────┘
 ```
 
@@ -92,13 +94,22 @@ Andee is a Claude agent running in Cloudflare's sandbox environment. This docume
 - Sub-5ms retrieval keeps Andee feeling fast
 - Single portable .mv2 files per user/scope
 
-**File Structure**:
+**File Structure** (R2-mounted at `/media`):
 ```
-/home/claude/memories/
-├── alice.mv2          # Alice's private conversations
-├── bob.mv2            # Bob's private conversations  
-└── shared.mv2         # Conversations in "us" mode
+/media/conversation-history/
+├── {chatId}/              # One directory per Telegram chat
+│   └── memory.mv2         # Conversation history for that chat
+└── .memvid/
+    └── models/            # Embedding models (shared across all chats)
+        └── all-MiniLM-L6-v2/
+
+# Examples:
+# Private chat with user 123456789: /media/conversation-history/123456789/memory.mv2
+# Group chat -1003285272358:        /media/conversation-history/-1003285272358/memory.mv2
 ```
+
+**Key benefit**: R2-mounted storage means memvid data persists across container restarts
+without needing to be included in snapshots (which reduces snapshot size by ~97%).
 
 **What gets stored** (each conversation turn):
 ```typescript
@@ -118,31 +129,37 @@ interface ConversationTurn {
 ```
 
 **Appending to memory** (after each conversation turn):
+
+Note: In production, this is handled automatically by `persistent-server.script.js`
+using the `memvid` CLI. The chatId comes from the Telegram message context.
+
 ```typescript
+// Conceptual example - actual implementation uses CLI
 import { open } from '@memvid/sdk';
 
 async function appendConversation(
-  scope: 'alice' | 'bob' | 'shared',
+  chatId: string,  // Telegram chatId (e.g., "123456789" or "-1003285272358")
   turn: ConversationTurn
 ) {
-  const mem = await open(`/home/claude/memories/${scope}.mv2`);
-  
+  const memvidPath = `/media/conversation-history/${chatId}/memory.mv2`;
+  const mem = await open(memvidPath);
+
   // Build searchable text from the turn
   const searchableText = buildSearchableText(turn);
-  
+
   await mem.put({
     title: `${turn.role} @ ${new Date(turn.timestamp).toISOString()}`,
     label: 'conversation',
     text: searchableText,
     metadata: {
       timestamp: turn.timestamp,
-      user_id: turn.user_id,
+      chat_id: chatId,
       role: turn.role,
       artifacts_created: turn.artifacts_created,
       artifacts_referenced: turn.artifacts_referenced
     }
   });
-  
+
   await mem.commit();
 }
 
@@ -163,26 +180,32 @@ function buildSearchableText(turn: ConversationTurn): string {
 ```
 
 **Searching conversation history**:
+
+In production, use the `memvid find` CLI command. The chatId determines which
+memory file to search - each chat has its own isolated conversation history.
+
+```bash
+# Search within a specific chat's conversation history
+memvid find /media/conversation-history/{chatId}/memory.mv2 --query "recipe" --mode hybrid
+
+# Example for group chat:
+memvid find /media/conversation-history/-1003285272358/memory.mv2 --query "pasta carbonara" --mode hybrid
+```
+
 ```typescript
+// Conceptual TypeScript example
 async function searchConversations(
-  userId: string,
+  chatId: string,  // Telegram chatId
   query: string,
   options: { mode?: 'lex' | 'sem' | 'hybrid'; k?: number } = {}
 ) {
-  const scopes = getScopesForUser(userId); // ['alice', 'shared'] or ['bob', 'shared']
-  
-  const results = await Promise.all(
-    scopes.map(async (scope) => {
-      const mem = await open(`/home/claude/memories/${scope}.mv2`);
-      return mem.find(query, { 
-        k: options.k || 20, 
-        mode: options.mode || 'hybrid' 
-      });
-    })
-  );
-  
-  // Merge and sort by score
-  return results.flatMap(r => r.hits).sort((a, b) => b.score - a.score);
+  const memvidPath = `/media/conversation-history/${chatId}/memory.mv2`;
+  const mem = await open(memvidPath);
+
+  return mem.find(query, {
+    k: options.k || 20,
+    mode: options.mode || 'hybrid'
+  });
 }
 ```
 
@@ -202,11 +225,11 @@ async function searchConversations(
 #### Directory Structure
 
 ```
+# Conversation Memory (R2-mounted):
+/media/conversation-history/{chatId}/memory.mv2
+
+# Artifacts (container filesystem):
 /home/claude/
-├── memories/
-│   ├── alice.mv2
-│   ├── bob.mv2
-│   └── shared.mv2
 ├── shared/
 │   └── lists/
 │       ├── MENU.JSON                      # Schema + vocabularies for ALL shared artifact types
@@ -235,6 +258,9 @@ async function searchConversations(
 
 **Path patterns**:
 ```
+# Conversation Memory (R2-mounted)
+/media/conversation-history/{chatId}/memory.mv2
+
 # Shared artifacts (default)
 /home/claude/shared/lists/{artifact_type}/{name}-{uuid}.md
 
@@ -1276,11 +1302,12 @@ echo "SCOPE: ${SCOPE}"
 5. Andee responds: "I've saved the Pasta Carbonara recipe! 
                     (ref: a1b2c3d4)"
 
-6. This entire exchange (including the UUID) is appended to shared.mv2
+6. This entire exchange (including the UUID) is appended to the chat's memory.mv2
+   (/media/conversation-history/{chatId}/memory.mv2)
 
 7. Later, user asks: "What was that Italian recipe from last week?"
 
-8. Andee searches shared.mv2, finds the conversation containing 
+8. Andee searches the chat's memory.mv2, finds the conversation containing
    "pasta carbonara" and "a1b2c3d4"
 
 9. Andee uses the UUID to locate and read the actual file:
@@ -1295,9 +1322,11 @@ echo "SCOPE: ${SCOPE}"
    Output: "CREATED: /home/claude/private/alice/lists/recipes/family-cookie-recipe-x1y2z3.md"
            "SCOPE: secret"
 
-3. This goes in alice.mv2 (private conversation memory), NOT shared.mv2
+3. This goes in alice's private chat memory.mv2 (same file as all her conversations)
+   Note: Memvid is per-chat, not per-user. "Secret" affects artifact storage location,
+   not memvid storage.
 
-4. Bob cannot see or search for this recipe
+4. Other users cannot see the artifact (stored in /home/claude/private/alice/lists/)
 ```
 
 ---
@@ -1552,7 +1581,7 @@ echo "]"
 │                         APPEND TO CONVERSATION MEMORY                       │
 │                                                                             │
 │  → User message + Andee response + tool calls + artifact UUIDs              │
-│  → Appended to shared.mv2 (or alice.mv2/bob.mv2 for secret artifacts)       │
+│  → Appended to /media/conversation-history/{chatId}/memory.mv2              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -1569,76 +1598,93 @@ echo "]"
 
 ## User Identity Model
 
-**Reality**: Andee runs on Telegram. Users are identified by numeric Telegram `senderId` (e.g., `123456789`).
+**Reality**: Andee runs on Telegram. Each chat (private or group) is identified by a numeric `chatId`.
 
-**Documentation convention**: Examples in this document use "alice" and "bob" for readability. In production, these map to actual Telegram sender IDs.
+**Key identifiers from Telegram**:
+- `chatId` - The Telegram chat ID (positive for private, negative for groups)
+- `senderId` - The user who sent the message (used for artifacts, not memvid)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SENDERD MAPPING                                          │
+│                    CHAT-BASED MEMORY MODEL                                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  In examples:     In reality:                                               │
-│  alice        →   123456789 (Telegram sender ID)                            │
-│  bob          →   987654321 (Telegram sender ID)                            │
-│  shared       →   shared (literal string for group/shared context)          │
+│  Conversation Memory (Memvid):                                              │
+│  • Unified by chatId - NOT split by user identity                           │
+│  • Path: /media/conversation-history/{chatId}/memory.mv2                    │
 │                                                                             │
-│  Path examples:                                                             │
-│  /home/claude/private/alice/    →   /home/claude/private/123456789/         │
-│  /home/claude/private/bob/      →   /home/claude/private/987654321/         │
+│  Examples:                                                                  │
+│  Private chat:  /media/conversation-history/123456789/memory.mv2            │
+│  Group chat:    /media/conversation-history/-1003285272358/memory.mv2       │
 │                                                                             │
-│  Memory file context comes from Telegram message:                           │
-│  • Private chat (isGroup=false): Uses senderId for private memory           │
-│  • Group chat (isGroup=true): Uses shared.mv2 for group conversations       │
+│  Artifact Storage (still in container filesystem):                          │
+│  • Shared: /home/claude/shared/lists/{type}/                                │
+│  • Private: /home/claude/private/{senderId}/lists/{type}/                   │
+│                                                                             │
+│  Note: Artifacts use senderId for ownership, memvid uses chatId for scope   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Environment variable**: Scripts receive `SENDER_ID` from the calling context (persistent-server.script.js).
+**Environment variables available to scripts**:
+- `CHAT_ID` - The Telegram chat ID (for memvid path)
+- `SENDER_ID` - The user who sent the message (for artifact ownership)
+- `IS_GROUP` - Whether this is a group chat
 
 ---
 
 ## Multi-User Access Model
 
-**Default: Shared by default**. All artifacts go to `shared/` unless explicitly marked as secret.
+**Two separate storage systems with different access models:**
+
+1. **Conversation Memory (Memvid in R2)** - Isolated by chat, not by user
+2. **Artifacts (Container filesystem)** - Shared by default, private on request
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         SHARED (Default for all)                            │
+│                    CONVERSATION MEMORY (R2-Mounted Memvid)                  │
+├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
+│  /media/conversation-history/{chatId}/memory.mv2                            │
+│                                                                             │
+│  • Each Telegram chat has its own isolated conversation history             │
+│  • Private chat: Only that user's conversations                             │
+│  • Group chat: All group participants share the same memory                 │
+│  • R2-mounted = persists across container restarts                          │
+│  • NOT included in snapshots (reduces snapshot size by ~97%)                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ARTIFACTS (Container Filesystem)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  SHARED (Default for all):                                                  │
 │  /home/claude/shared/lists/recipes/*       All users can access             │
 │  /home/claude/shared/lists/movies/*        All users can access             │
 │  /home/claude/shared/lists/grocery/*       All users can access             │
-│  /home/claude/shared/shared.mv2            Shared conversation memory       │
 │                                                                             │
 │  → This is where 99% of artifacts live                                      │
 │  → Created unless user explicitly says "secret" or "private"                │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         PRIVATE (Per-User)                                  │
 │                                                                             │
+│  PRIVATE (Per-User):                                                        │
 │  /home/claude/private/{senderId}/lists/*   Only that user can access        │
-│  /home/claude/private/{senderId}/memory.mv2  User's private conversations   │
-│                                                                             │
-│  Example: /home/claude/private/123456789/lists/recipes/                     │
 │                                                                             │
 │  → Created only when user says "secret" or "private"                        │
 │  → Other users cannot see or search these                                   │
-│  → Directory created dynamically on first private artifact                  │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Access control implementation**:
+**Access control for artifacts** (memvid access is implicit via chatId):
 ```javascript
 // senderId is the numeric Telegram user ID (e.g., "123456789")
-function getAccessiblePaths(senderId) {
+function getAccessibleArtifactPaths(senderId) {
   const paths = [
-    '/home/claude/shared/',                  // Everyone gets shared
-    '/home/claude/shared/shared.mv2'         // Shared conversation memory
+    '/home/claude/shared/'  // Everyone gets shared artifacts
   ];
 
-  // Add user's private area (senderId is always available from Telegram context)
+  // Add user's private artifact area
   if (senderId) {
     paths.push(`/home/claude/private/${senderId}/`);
   }
@@ -1646,7 +1692,7 @@ function getAccessiblePaths(senderId) {
   return paths;
 }
 
-function canAccessPath(senderId, path) {
+function canAccessArtifactPath(senderId, path) {
   // Shared is always accessible
   if (path.includes('/shared/')) return true;
 
@@ -1789,17 +1835,18 @@ Memvid files grow over time. Options:
 
 This architecture gives Andee:
 
-1. **Fast conversation memory** via Memvid with hybrid search
+1. **Fast conversation memory** via Memvid with hybrid search (R2-mounted for persistence)
 2. **Human-readable artifacts** as markdown files with YAML frontmatter
 3. **Shared by default** — Everything is shared unless user explicitly says "secret" or "private"
 4. **MENU.JSON at lists/ level** — Single file tracking schema and all vocabulary values with descriptions
 5. **UUID-based linking** between conversations and artifacts
-6. **Automatic backup** via R2 snapshots
+6. **Automatic backup** via R2 snapshots (artifacts only - memvid is in R2)
 7. **Multi-user privacy** with private/{senderId}/ paths for private artifacts
 8. **Tag-based filtering** via yq on YAML frontmatter
 9. **Two Claude skills** for memory search and artifact management
 
 **Key insights**:
+- **R2-mounted memvid storage** — Conversation history at `/media/conversation-history/{chatId}/memory.mv2` persists across container restarts without snapshots (97% snapshot size reduction)
 - **Vocabulary descriptions guide the AI** — Each tag value has context (e.g., "quick" = "Can be made in 30 minutes or less") so the AI picks the right ones
 - **yq gives us jq-like power** for YAML frontmatter queries without any infrastructure
 - **Shared-by-default** means users don't have to think about privacy unless they explicitly want it

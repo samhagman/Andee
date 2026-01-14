@@ -126,3 +126,63 @@ export interface PreviewState {
   snapshotKey: string | null;
   snapshotDate: string | null;
 }
+
+// Schedule types
+export interface ScheduleConfig {
+  version: string;
+  timezone: string;
+  schedules: Record<string, ScheduleEntry>;
+}
+
+export interface ScheduleEntry {
+  description: string;
+  cron: string;
+  enabled: boolean;
+  prompt: string;
+}
+
+export interface ScheduleWithNextRun {
+  id: string;
+  description: string;
+  cron: string;
+  timezone: string;
+  prompt: string;
+  enabled: boolean;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+}
+
+export interface ScheduleExecution {
+  id: string;
+  scheduleId: string;
+  executedAt: number;
+  status: "pending" | "running" | "completed" | "failed";
+  error?: string;
+  durationMs?: number;
+}
+
+export interface GetScheduleConfigResponse {
+  success: boolean;
+  config?: ScheduleConfig;
+  schedules?: ScheduleWithNextRun[];
+  error?: string;
+}
+
+export interface SaveScheduleConfigResponse {
+  success: boolean;
+  message?: string;
+  schedules?: ScheduleWithNextRun[];
+  error?: string;
+}
+
+export interface ListScheduleRunsResponse {
+  success: boolean;
+  executions: ScheduleExecution[];
+  error?: string;
+}
+
+export interface RunScheduleNowResponse {
+  success: boolean;
+  message?: string;
+  error?: string;
+}

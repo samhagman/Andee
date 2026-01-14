@@ -31,6 +31,7 @@
 // Re-export Durable Objects for bindings
 export { Sandbox } from "@cloudflare/sandbox";
 export { SchedulerDO } from "./scheduler/SchedulerDO";
+export { RecurringSchedulesDO } from "./scheduler/RecurringSchedulesDO";
 
 import { proxyToSandbox, getSandbox } from "@cloudflare/sandbox";
 
@@ -61,6 +62,15 @@ import {
   handleTerminal,
   handleTerminalUrl,
   handleWsContainerTest,
+  // Recurring schedules
+  handleGetScheduleConfig,
+  handleSaveScheduleConfig,
+  handleListScheduleRuns,
+  handleRunScheduleNow,
+  handleToggleSchedule,
+  handleGetScheduleConfigYaml,
+  handleSaveScheduleConfigYaml,
+  handleScheduledTask,
 } from "./handlers";
 
 /**
@@ -230,6 +240,49 @@ export default {
       case "/reminders":
         if (request.method === "GET") {
           return handleListReminders(ctx);
+        }
+        break;
+
+      // Recurring schedule endpoints
+      case "/schedule-config":
+        if (request.method === "GET") {
+          return handleGetScheduleConfig(ctx);
+        }
+        if (request.method === "PUT") {
+          return handleSaveScheduleConfig(ctx);
+        }
+        break;
+
+      case "/schedule-runs":
+        if (request.method === "GET") {
+          return handleListScheduleRuns(ctx);
+        }
+        break;
+
+      case "/run-schedule-now":
+        if (request.method === "POST") {
+          return handleRunScheduleNow(ctx);
+        }
+        break;
+
+      case "/toggle-schedule":
+        if (request.method === "POST") {
+          return handleToggleSchedule(ctx);
+        }
+        break;
+
+      case "/schedule-config-yaml":
+        if (request.method === "GET") {
+          return handleGetScheduleConfigYaml(ctx);
+        }
+        if (request.method === "PUT") {
+          return handleSaveScheduleConfigYaml(ctx);
+        }
+        break;
+
+      case "/scheduled-task":
+        if (request.method === "POST") {
+          return handleScheduledTask(ctx);
         }
         break;
 

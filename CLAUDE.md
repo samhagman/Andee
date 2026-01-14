@@ -150,6 +150,7 @@ cd sandbox-ide && npm run deploy   # Deploy to Cloudflare Pages
 - Monaco editor with syntax highlighting
 - Snapshot browsing and restore (📷 button)
 - Auto-restore from R2 on fresh containers
+- Recurring schedules management (⏰ button) - view, edit, toggle, run now
 
 ## Critical Configuration
 
@@ -277,7 +278,7 @@ The telegram-bot includes a Grammy API transformer that **skips Telegram API cal
 
 ## R2 Storage Structure
 
-Sessions and snapshots are organized by Telegram user ID for data isolation:
+Sessions, snapshots, and schedule configs are organized by Telegram user/chat ID:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -292,11 +293,15 @@ Sessions and snapshots are organized by Telegram user ID for data isolation:
 │  ├── sessions/groups/{chatId}.json                                      │
 │  └── snapshots/groups/{chatId}/{timestamp}.tar.gz                       │
 │                                                                         │
+│  RECURRING SCHEDULES (per-chat, stored in SESSIONS bucket):             │
+│  └── schedules/{chatId}/recurring.yaml                                  │
+│                                                                         │
 │  Example paths:                                                         │
 │  ├── sessions/123456789/123456789.json     (private: user=chat)         │
 │  ├── sessions/123456789/-100987654321.json (private bot to user)        │
 │  ├── sessions/groups/-100555666777.json    (supergroup)                 │
-│  └── snapshots/123456789/-100987654321/2025-01-06T12-00-00-000Z.tar.gz  │
+│  ├── snapshots/123456789/-100987654321/2025-01-06T12-00-00-000Z.tar.gz  │
+│  └── schedules/-100555666777/recurring.yaml (group schedule config)     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -651,6 +656,142 @@ curl "http://localhost:8787/reminders?senderId=123456789" \
   -H "X-API-Key: $ANDEE_API_KEY"
 ```
 
+## Recurring Schedules System
+
+Andee supports recurring scheduled messages via the RecurringSchedulesDO Durable Object. Unlike one-time reminders, recurring schedules use cron expressions and prompts to generate fresh responses each time.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  RECURRING SCHEDULES SYSTEM                                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  R2 Storage (Source of Truth)                                           │
+│  schedules/{chatId}/recurring.yaml                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  version: "1.0"                                                 │   │
+│  │  timezone: "America/New_York"                                   │   │
+│  │  schedules:                                                     │   │
+│  │    morning-weather:                                             │   │
+│  │      cron: "0 6 * * *"                                          │   │
+│  │      prompt: "Generate a weather report for Boston..."          │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                          │                                              │
+│                          │ PUT /schedule-config-yaml                    │
+│                          ▼                                              │
+│  RecurringSchedulesDO (per-chat, SQLite + DO alarm)                     │
+│  • Syncs from YAML on save                                              │
+│  • Single alarm → fires at soonest next_run_at                          │
+│  • On alarm: POST /scheduled-task → wakes container → Claude responds   │
+│                          │                                              │
+│                          ▼                                              │
+│  Container receives: "[SCHEDULED: morning-weather]\n{prompt}"           │
+│  Claude generates contextual response → sends to Telegram               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key difference from reminders**:
+- **Reminders**: Fixed message, one-time delivery, user-created in chat
+- **Schedules**: Prompt-based (Claude generates fresh response), recurring, IDE-managed
+
+### YAML Schema
+
+```yaml
+# R2: schedules/{chatId}/recurring.yaml
+version: "1.0"
+timezone: "America/New_York"  # IANA timezone
+
+schedules:
+  morning-weather:                    # Unique ID (kebab-case)
+    description: "Daily morning weather"
+    cron: "0 6 * * *"                 # 6:00 AM daily
+    enabled: true
+    prompt: |
+      Good morning! Generate a weather report for Boston.
+      Be warm and conversational.
+```
+
+### System Sender ID
+
+Scheduled tasks use `senderId: "system"` - a first-class sender type for automated messages:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SENDER ID TYPES                                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Telegram User ID (e.g., "123456789")                                   │
+│  → Path: snapshots/{senderId}/{chatId}/                                 │
+│                                                                         │
+│  "system" (SYSTEM_SENDER_ID constant)                                   │
+│  → Automated/scheduled tasks, internal operations                       │
+│  → Groups:  snapshots/groups/{chatId}/                                  │
+│  → Private: snapshots/{chatId}/{chatId}/  (chatId == user's ID)         │
+│                                                                         │
+│  Why it works for private: In Telegram, private chatId == user's ID     │
+│  So snapshots/{chatId}/{chatId}/ is the user's own snapshot path        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**TypeScript import:**
+```typescript
+import { SYSTEM_SENDER_ID } from '@andee/shared/constants';
+// SYSTEM_SENDER_ID = "system"
+```
+
+### IDE Integration
+
+The Sandbox IDE includes a Schedules panel (⏰ button) for managing recurring schedules:
+
+- View all schedules with enable/disable toggles
+- Edit YAML configuration directly
+- Run schedules manually for testing
+- See next execution times
+
+### Testing Schedules
+
+```bash
+# Create/update schedule config (YAML)
+curl -X PUT "http://localhost:8787/schedule-config-yaml?chatId=999999999&botToken=$BOT_TOKEN" \
+  -H "Content-Type: text/yaml" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d 'version: "1.0"
+timezone: "America/New_York"
+schedules:
+  test-schedule:
+    description: "Test"
+    cron: "0 6 * * *"
+    enabled: true
+    prompt: "Say hello!"'
+
+# Get schedule config
+curl "http://localhost:8787/schedule-config?chatId=999999999" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Toggle schedule on/off
+curl -X POST "http://localhost:8787/toggle-schedule?chatId=999999999&scheduleId=test-schedule&enabled=false" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Run schedule immediately (for testing)
+curl -X POST "http://localhost:8787/run-schedule-now" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"999999999","scheduleId":"test-schedule","botToken":"'$BOT_TOKEN'"}'
+
+# View execution history
+curl "http://localhost:8787/schedule-runs?chatId=999999999&limit=10" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+```
+
+**Key files**:
+- `claude-sandbox-worker/src/scheduler/RecurringSchedulesDO.ts` - DO with SQLite + alarms
+- `claude-sandbox-worker/src/handlers/schedules.ts` - HTTP endpoints
+- `claude-sandbox-worker/src/handlers/scheduled-task.ts` - Execution handler
+- `shared/types/schedule.ts` - Type definitions
+- `shared/constants/system.ts` - SYSTEM_SENDER_ID constant
+- `sandbox-ide/src/components/SchedulesPanel.ts` - IDE panel
+
 ## Key Files
 
 - `claude-sandbox-worker/src/index.ts` - Worker endpoints, Sandbox SDK orchestration
@@ -698,6 +839,13 @@ curl "http://localhost:8787/reminders?senderId=123456789" \
 | `/cancel-reminder` | POST | Cancel a pending reminder |
 | `/complete-reminder` | POST | Mark reminder as completed |
 | `/reminders?senderId=X` | GET | List reminders for a user |
+| `/schedule-config?chatId=X` | GET | Get recurring schedule config (JSON) |
+| `/schedule-config-yaml?chatId=X` | GET | Get recurring schedule config (YAML) |
+| `/schedule-config-yaml?chatId=X&botToken=Y` | PUT | Save schedule config (YAML body) |
+| `/toggle-schedule?chatId=X&scheduleId=Y&enabled=Z` | POST | Enable/disable a schedule |
+| `/run-schedule-now` | POST | Execute a schedule immediately |
+| `/schedule-runs?chatId=X&limit=N` | GET | Get schedule execution history |
+| `/scheduled-task` | POST | Internal: execute scheduled task (called by DO) |
 
 ### Sandbox IDE Endpoints (claude-sandbox-worker)
 

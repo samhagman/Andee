@@ -42,6 +42,43 @@ Andee supports voice message input via Telegram. Voice notes are:
 
 See `handlers/ask.ts:transcribeAudio()` for implementation. Log events are prefixed with `[VOICE]`.
 
+### Testing Recurring Schedules
+
+Recurring schedules enable Andee to send proactive, prompt-based messages at specified times.
+
+**Key concepts:**
+- Schedules are per-chat, stored as YAML in R2 (`schedules/{chatId}/recurring.yaml`)
+- Managed via IDE (⏰ button) or API, not by Andee in chat
+- Use cron expressions for timing, prompts for content generation
+- `senderId: "system"` is used for automated messages (first-class sender type)
+
+**Testing locally:**
+```bash
+# Create a test schedule
+curl -X PUT "http://localhost:8787/schedule-config-yaml?chatId=999999999&botToken=$BOT_TOKEN" \
+  -H "Content-Type: text/yaml" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d 'version: "1.0"
+timezone: "America/New_York"
+schedules:
+  test:
+    description: "Test schedule"
+    cron: "0 6 * * *"
+    enabled: true
+    prompt: "Say hello!"'
+
+# Run immediately to test
+curl -X POST "http://localhost:8787/run-schedule-now" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"999999999","scheduleId":"test","botToken":"'$BOT_TOKEN'"}'
+```
+
+**Verifying execution:**
+- Check logs for `[SCHEDULED] Executing schedule: {id}`
+- Verify snapshot restore: `Restoring from snapshot: snapshots/{chatId}/{chatId}/...`
+- Container receives prompt as `[SCHEDULED: {id}]\n{prompt}`
+
 ### Testing Timezone
 
 Timezone preferences persist across container restarts via snapshots:

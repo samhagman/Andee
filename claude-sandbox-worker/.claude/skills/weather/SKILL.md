@@ -35,11 +35,28 @@ For other cities, use WebSearch to find coordinates.
 
 ### 2. Fetch Weather Data
 
-Use WebFetch to call the Open-Meteo API:
+Use WebFetch to call the Open-Meteo API with EXTENDED parameters for detailed Mini App:
 
 ```
-https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&current=temperature_2m,apparent_temperature,weather_code,precipitation&hourly=temperature_2m,precipitation_probability,weather_code&forecast_days=1&timezone=auto
+https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&current=temperature_2m,apparent_temperature,weather_code,precipitation,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,pressure_msl,visibility,uv_index&hourly=temperature_2m,precipitation_probability,weather_code&daily=sunrise,sunset&forecast_days=1&timezone=auto
 ```
+
+**API Fields Used:**
+- `current.temperature_2m` - Current temperature (Celsius)
+- `current.apparent_temperature` - Feels like temperature
+- `current.weather_code` - WMO weather code
+- `current.relative_humidity_2m` - Humidity percentage
+- `current.wind_speed_10m` - Wind speed (km/h)
+- `current.wind_direction_10m` - Wind direction (0-360 degrees)
+- `current.pressure_msl` - Sea level pressure (hPa)
+- `current.visibility` - Visibility (meters, convert to km)
+- `current.uv_index` - UV index
+- `hourly.temperature_2m` - Hourly temperatures
+- `hourly.precipitation_probability` - Hourly precipitation chance
+- `hourly.weather_code` - Hourly weather codes
+- `daily.sunrise[0]` - Sunrise time (HH:mm format)
+- `daily.sunset[0]` - Sunset time (HH:mm format)
+- `timezone` - Timezone from response header
 
 ### 3. Analyze the Data
 
@@ -166,40 +183,58 @@ A light jacket should be fine today.
 
 ### 5. Generate Mini App Data
 
-**CRITICAL: Keep the data MINIMAL to avoid corruption. DO NOT include hourly data.**
+Create EXTENDED JSON with ALL fields. The Mini App requires the full detailed format.
+Typical size: 450-550 chars base64url encoded.
 
-Create a COMPACT JSON (under 300 characters) matching the `WeatherDataCompact` interface defined in `apps/src/lib/types/weather.ts`:
-
+**ALL FIELDS REQUIRED:**
 ```json
-{"loc":"Boston","c":-2,"f":28,"fl":-7,"lo":-6,"hi":-2,"wc":3}
+{
+  "loc": "Boston",           // City name (short)
+  "c": -2,                   // Current temp Celsius (integer)
+  "f": 28,                   // Current temp Fahrenheit (integer)
+  "fl": -7,                  // Feels like Celsius (integer)
+  "ff": 19,                  // Feels like Fahrenheit (integer)
+  "lo": -6,                  // Low temp Celsius (integer)
+  "hi": -2,                  // High temp Celsius (integer)
+  "wc": 3,                   // Weather code (WMO integer)
+  "h": 82,                   // Humidity percentage (0-100)
+  "wd": 15,                  // Wind speed (km/h)
+  "wdir": 270,               // Wind direction (0-360 degrees, where 0=N, 90=E, 180=S, 270=W)
+  "p": 65,                   // Precipitation probability (0-100)
+  "press": 1013,             // Pressure (hPa)
+  "vis": 8,                  // Visibility (km, convert from meters: meters/1000)
+  "uv": 2.5,                 // UV index (0-12, can be decimal)
+  "desc": "Mostly Cloudy",   // Weather description
+  "sr": "07:15",             // Sunrise time (HH:mm format)
+  "ss": "17:02",             // Sunset time (HH:mm format)
+  "tz": "America/New_York",  // Timezone identifier
+  "hr": [                    // Hourly forecast (8+ hours required)
+    {"t": "00:00", "c": -3, "wc": 3, "p": 45},
+    {"t": "03:00", "c": -4, "wc": 3, "p": 65},
+    {"t": "06:00", "c": -5, "wc": 71, "p": 78},
+    {"t": "09:00", "c": -2, "wc": 71, "p": 82},
+    {"t": "12:00", "c": 0, "wc": 3, "p": 55},
+    {"t": "15:00", "c": 1, "wc": 3, "p": 45},
+    {"t": "18:00", "c": -1, "wc": 3, "p": 35},
+    {"t": "21:00", "c": -3, "wc": 3, "p": 25}
+  ]
+}
 ```
 
-Fields (all required, use integers):
-- `loc`: City name (short)
-- `c`: Current temp Celsius (integer)
-- `f`: Current temp Fahrenheit (integer)
-- `fl`: Feels like Celsius (integer)
-- `lo`: Low temp Celsius (integer)
-- `hi`: High temp Celsius (integer)
-- `wc`: Weather code (integer)
-
-**TypeScript interface reference:** `apps/src/lib/types/weather.ts`
-
 **To generate the Direct Link Mini App URL:**
-1. Create the compact JSON exactly as shown above
-2. Base64 encode it (will be ~80 chars)
+1. Create the complete JSON with all required fields
+2. Base64 encode it
 3. Convert to base64url: replace `+` with `-`, `/` with `_`, remove trailing `=`
 4. Format: `https://t.me/HeyAndee_bot/app?startapp=weather_{BASE64URL}`
 
-**startapp format:** `{component}_{base64url_data}`
-- `component`: The Mini App to load (e.g., `weather`)
-- `base64url_data`: The base64url-encoded JSON data
+**Example encoding:**
+```
+JSON size: ~480 chars
+Base64url: eyJsb2MiOiJCb3N0b24iLCJjIjotMiwiZiI6MjgsImZsIjotNywiZmYiOjE5LCJsbyI6LTYsImhpIjotMiwid2MiOjMsImgiOjgyLCJ3ZCI6MTUsIndkaXIiOjI3MCwicCI6NjUsInByZXNzIjoxMDEzLCJ2aXMiOjgsInV2IjoyLjUsImRlc2MiOiJNb3N0bHkgQ2xvdWR5Iiwic3IiOiIwNzoxNSIsInNzIjoiMTc6MDIiLCJ0eiI6IkFtZXJpY2EvTmV3X1lvcmsiLCJociI6W3sidCI6IjAwOjAwIiwiYyI6LTMsIndjIjozLCJwIjo0NX0seyJ0IjoiMDM6MDAiLCJjIjotNCwid2MiOjMsInAiOjY1fSx7InQiOiIwNjowMCIsImMiOi01LCJ3YyI6NzEsInAiOjc4fSx7InQiOiIwOTowMCIsImMiOi0yLCJ3YyI6NzEsInAiOjgyfSx7InQiOiIxMjowMCIsImMiOjAsIndjIjozLCJwIjo1NX0seyJ0IjoiMTU6MDAiLCJjIjoxLCJ3YyI6MywicCI6NDV9LHsidCI6IjE4OjAwIiwiYyI6LTEsIndjIjozLCJwIjozNX0seyJ0IjoiMjE6MDAiLCJjIjotMywid2MiOjMsInAiOjI1fV19
+Size: ~520 chars base64url (fits easily in URL)
+```
 
-**Example with real encoding:**
-JSON: `{"loc":"Boston","c":-3,"f":27,"fl":-7,"lo":-6,"hi":-2,"wc":3}`
-Base64url (no padding): `eyJsb2MiOiJCb3N0b24iLCJjIjotMywiZiI6MjcsImZsIjotNywibG8iOi02LCJoaSI6LTIsIndjIjozfQ`
-
-Full link: `[View Full Weather Report](https://t.me/HeyAndee_bot/app?startapp=weather_eyJsb2MiOiJCb3N0b24iLCJjIjotMywiZiI6MjcsImZsIjotNywibG8iOi02LCJoaSI6LTIsIndjIjozfQ)`
+**TypeScript interface reference:** `apps/src/lib/types/weather.ts`
 
 ## Weather Code Reference
 

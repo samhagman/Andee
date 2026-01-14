@@ -57,7 +57,7 @@ The terminal uses node-pty for full PTY support:
 │     $ cat /workspace/telegram_agent.log | tail -50                      │
 │                                                                         │
 │  4. Debug memvid search                                                 │
-│     $ memvid find /home/claude/shared/shared.mv2 "query"                │
+│     $ memvid find /media/conversation-history/$CHAT_ID/memory.mv2 "query"│
 │                                                                         │
 │  5. Verify YAML in artifacts                                            │
 │     $ yq '.tags' /home/claude/shared/lists/recipes/pasta-abc123.md      │
