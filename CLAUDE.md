@@ -148,6 +148,8 @@ cd sandbox-ide && npm run deploy   # Deploy to Cloudflare Pages
 - Claude Code TUI works correctly
 - Browse any path (/workspace, /home/claude, etc.)
 - Monaco editor with syntax highlighting
+- Snapshot browsing and restore (📷 button)
+- Auto-restore from R2 on fresh containers
 
 ## Critical Configuration
 
@@ -338,6 +340,101 @@ Snapshots are created automatically to preserve `/workspace` and `/home/claude` 
 
 **Per-message snapshots** are the primary method - they ensure you never lose more than one message worth of work, even for active chats. The 55-minute idle fallback exists as a safety net.
 
+### Large File Support (Streaming)
+
+Snapshots support files up to **5TB** via R2 multipart upload streaming:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STREAMING SNAPSHOT (for files > 25MB)                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Container              Worker                     R2 Multipart         │
+│  ┌──────────┐          ┌──────────────┐          ┌──────────────┐      │
+│  │ tar -czf │          │ split -b 5M  │          │ uploadPart() │      │
+│  │ /tmp/... │  ──────► │ (on container)│ ──────► │ partNumber++ │      │
+│  └──────────┘          │ readFile x N │          │ complete()   │      │
+│                        └──────────────┘          └──────────────┘      │
+│                                                                         │
+│  Memory: Only 5MB buffered at a time (under 32MB RPC limit)             │
+│  Threshold: Files > 25MB use streaming, smaller use buffered            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Verified**: Tested with 30MB (7 parts) and 100MB (21 parts) random data successfully.
+
+**Excluded from snapshots** (persists via R2 mount instead):
+- `/media/` - R2-mounted storage (conversation history, embedding models)
+- `/home/claude/.memvid/` - Legacy embedding models location
+- `/home/claude/shared/*.mv2` - Legacy shared conversation memory
+- `/home/claude/private/` - Legacy private user memory directories
+
+This reduces snapshot sizes from ~78MB to <100KB for typical chats.
+
+**Key files:**
+- `src/lib/streaming.ts` - Helper functions for chunked upload/download
+- `src/handlers/snapshot.ts` - Uses streaming for files > 25MB
+- `src/handlers/ide.ts` - Auto-restore uses streaming for large snapshots
+
+### Snapshot Restore (IDE)
+
+The Sandbox IDE supports browsing and restoring historical snapshots:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SNAPSHOT RESTORE FLOW (IDE)                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  User clicks 📷 button in IDE                                           │
+│       │                                                                 │
+│       ▼                                                                 │
+│  Snapshot List (sorted by date, shows size)                             │
+│       │                                                                 │
+│       ├── 👁 Preview: Browse snapshot contents without restoring        │
+│       │              (Downloads to /tmp, extracts with tar -tzf)        │
+│       │                                                                 │
+│       └── ↩ Restore: Replace container files with snapshot              │
+│              │                                                          │
+│              ▼                                                          │
+│         1. Download snapshot from R2                                    │
+│         2. Clear /workspace/* and /home/claude/*                        │
+│         3. Extract tar.gz to container                                  │
+│         4. Copy snapshot to R2 as "latest" (markAsLatest)               │
+│         5. Session may become stale → user clicks "Restart Sandbox"     │
+│         6. Fresh container auto-restores from R2 latest                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key implementation details:**
+
+1. **markAsLatest copies, doesn't re-tar**: After restore, the original snapshot is copied directly to R2 as the "latest" key. This avoids session staleness issues that occur when re-creating a tar from container (large operations can cause "Unknown Error, TODO").
+
+2. **IDE auto-restore on fresh containers**: When `handleFiles()` accesses a fresh container (no `/tmp/.ide-initialized` marker), it automatically restores from the latest R2 snapshot. This ensures files persist after "Restart Sandbox".
+
+3. **Chunked base64 encoding**: Large snapshots (700KB+) use chunked conversion to avoid stack overflow. The spread operator `...new Uint8Array(arrayBuffer)` causes "Maximum call stack size exceeded" on large arrays.
+
+**Restore endpoints:**
+```bash
+# List snapshots
+GET /snapshots?chatId=X&senderId=Y&isGroup=Z
+
+# Preview snapshot contents (without restoring)
+GET /snapshot-files?sandbox=chat-X&snapshotKey=Y&path=/&chatId=X&senderId=Y&isGroup=Z
+GET /snapshot-file?sandbox=chat-X&snapshotKey=Y&path=/workspace/file.txt&chatId=X&senderId=Y&isGroup=Z
+
+# Restore snapshot (replaces container files)
+POST /restore
+{
+  "chatId": "X",
+  "senderId": "Y",
+  "isGroup": false,
+  "snapshotKey": "snapshots/Y/X/2026-01-12T04-16-53-540Z.tar.gz",
+  "markAsLatest": true
+}
+```
+
 ## Gotchas
 
 | Problem | Error | Solution |
@@ -353,6 +450,10 @@ Snapshots are created automatically to preserve `/workspace` and `/home/claude` 
 | node-pty build fails | `gyp ERR! build error` | Add build-essential + python3 to Dockerfile before `npm install -g node-pty` |
 | Terminal lines wrong position | Text at random positions | Ensure ws-terminal.js uses `pty.spawn()`, not `child_process.spawn()` |
 | IDE terminal not connecting | `ProcessExitedBeforeReadyError: Process exited with code 0` | ws-terminal.js thought healthy server exists (stale PID/port state). Restart sandbox via IDE button or `/restart` endpoint to clear stale state. |
+| Large snapshot stack overflow | `Maximum call stack size exceeded` | Don't use `btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))` on large files. Use chunked approach: build binary string in 32KB chunks, then btoa() once. |
+| Session stale after restore | `Unknown Error, TODO` on file operations | Large tar operations can cause session staleness. For markAsLatest, copy original snapshot to R2 instead of re-tarring. For IDE, auto-restore handles this on fresh containers. |
+| Files lost after IDE restart | Files present after restore, gone after restart | Fresh containers don't auto-restore unless code does it. `handleFiles()` now checks for `/tmp/.ide-initialized` marker and auto-restores from R2 if missing. |
+| Snapshot preview fails on large files | 500 error on `/snapshot-files` | Same chunked base64 fix needed in `snapshot-preview.ts`. Apply to all R2→container transfers over ~500KB. |
 
 ## Skills System
 
@@ -448,34 +549,47 @@ Andee has persistent memory using Memvid for conversation history and flat markd
 │  MEMORY ARCHITECTURE                                                     │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  /home/claude/                                                          │
-│  ├── shared/                      # Default for all users              │
-│  │   ├── shared.mv2               # Shared conversation memory (group)  │
+│  /media/ (R2-mounted, auto-persists)                                    │
+│  ├── conversation-history/                                              │
+│  │   └── {chatId}/memory.mv2      # Per-chat conversation memory        │
+│  │                                  (chatId = userId or groupId)        │
+│  └── .memvid/                                                           │
+│      └── models/                   # Embedding models (~133MB, shared)  │
+│                                                                         │
+│  /home/claude/ (backed up in snapshots)                                 │
+│  ├── shared/                       # Shared artifacts for all users     │
 │  │   └── lists/                                                         │
-│  │       ├── MENU.JSON            # Schema + vocabulary registry        │
-│  │       ├── recipes/             # {name}-{uuid}.md files              │
+│  │       ├── MENU.JSON             # Schema + vocabulary registry       │
+│  │       ├── recipes/              # {name}-{uuid}.md files             │
 │  │       ├── movies/                                                    │
 │  │       └── grocery/                                                   │
 │  │                                                                      │
-│  └── private/{senderId}/          # Per-user private storage            │
-│      ├── memory.mv2               # Private conversation memory         │
-│      ├── preferences.yaml         # User preferences (timezone, etc.)   │
+│  └── private/{senderId}/           # Per-user private storage           │
+│      ├── preferences.yaml          # User preferences (timezone, etc.)  │
 │      └── lists/                                                         │
 │          ├── MENU.JSON                                                  │
 │          └── recipes/                                                   │
 │                                                                         │
-│  Memory Type:                                                           │
-│  • Group chat (isGroup=true) → /home/claude/shared/shared.mv2           │
-│  • Private chat → /home/claude/private/{senderId}/memory.mv2            │
+│  Storage Split:                                                         │
+│  • Memvid (.mv2) → R2 mount (auto-persists, not in snapshots)          │
+│  • Artifacts → /home/claude (backed up via snapshots)                   │
+│  • Models → R2 mount (shared across all chats, ~133MB once)             │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key components**:
-- **Memvid** (.mv2 files) - Hybrid search over conversation history
-- **Artifacts** - Markdown files with YAML frontmatter (recipes, lists, notes)
+- **Memvid** (.mv2 files) - Hybrid search over conversation history, stored in R2 at `/media/conversation-history/{chatId}/`
+- **Artifacts** - Markdown files with YAML frontmatter (recipes, lists, notes), stored in `/home/claude/`
 - **MENU.JSON** - Schema and vocabulary registry for consistent tagging
 - **yq** - YAML processor for frontmatter queries
+
+**Why this split?**
+- Memvid files can be 50-100MB+ and change frequently → R2 auto-persists, no snapshot overhead
+- Artifacts are small (~KB) and change less often → included in snapshots for versioning
+- Embedding models are 133MB → stored once in R2, shared across all chats
+
+**Local dev note**: R2 mounting doesn't work in local dev (wrangler limitation). Memvid falls back to `/tmp/media/` which doesn't persist between sessions.
 
 See `ANDEE_MEMORY_TAD.md` for full architecture details.
 
@@ -558,7 +672,10 @@ curl "http://localhost:8787/reminders?senderId=123456789" \
   - `src/components/FileTree.ts` - File browser with navigation
   - `src/components/Editor.ts` - Monaco editor wrapper
 - `claude-sandbox-worker/.claude/scripts/ws-terminal.js` - PTY terminal server (node-pty)
-- `claude-sandbox-worker/src/handlers/ide.ts` - IDE endpoint handlers
+- `claude-sandbox-worker/src/handlers/ide.ts` - IDE endpoint handlers (includes `maybeAutoRestore()` for fresh containers)
+- `claude-sandbox-worker/src/handlers/snapshot.ts` - Snapshot create/restore endpoints (streaming for >25MB)
+- `claude-sandbox-worker/src/handlers/snapshot-preview.ts` - Snapshot preview (browse without restoring)
+- `claude-sandbox-worker/src/lib/streaming.ts` - R2 multipart upload/download for large files
 
 ## Endpoints Reference
 
@@ -588,8 +705,10 @@ curl "http://localhost:8787/reminders?senderId=123456789" \
 |----------|--------|---------|
 | `/sandboxes` | GET | List all R2 sessions with friendly names |
 | `/ws` | WS | WebSocket terminal (proxies to ws-terminal.js on port 8081) |
-| `/files` | GET | List directory contents |
+| `/files` | GET | List directory contents (auto-restores from R2 on fresh containers) |
 | `/file` | GET/PUT | Read/write file contents |
+| `/snapshot-files` | GET | List files in a snapshot's tar archive (preview without restoring) |
+| `/snapshot-file` | GET | Read a single file from a snapshot's tar archive |
 
 ### claude-telegram-bot
 

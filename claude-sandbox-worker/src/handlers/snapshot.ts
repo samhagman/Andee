@@ -16,32 +16,90 @@ import {
   getSnapshotPrefix,
 } from "../types";
 import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import { debug } from "../lib/debug";
+import { clearTerminalUrlCache } from "./ide";
+import {
+  getFileSize,
+  uploadLargeFileToR2,
+  downloadLargeFileFromR2,
+  STREAMING_THRESHOLD,
+} from "../lib/streaming";
 
 /**
  * Ensures the sandbox is healthy and ready to execute commands.
- * Uses listProcesses() first (which properly activates the sandbox),
- * then validates with an exec command.
+ * Uses exec() with retry logic - the first exec() call wakes a sleeping sandbox,
+ * and subsequent retries give it time to fully wake up.
  */
-async function ensureSandboxHealthy(sandbox: Sandbox): Promise<boolean> {
-  try {
-    // listProcesses() properly activates a sleeping sandbox
-    // (unlike exec() which fails on stale sessions)
-    const processes = await sandbox.listProcesses();
-    console.log(`[Snapshot] Sandbox has ${processes.length} process(es) running`);
+async function ensureSandboxHealthy(sandbox: Sandbox, chatId?: string): Promise<boolean> {
+  const timer = debug.timer('Snapshot', 'ensureSandboxHealthy', { chatId });
 
-    // Now try a simple exec to confirm the sandbox is responsive
-    const result = await sandbox.exec('echo "alive"', { timeout: 10000 });
-    return result.exitCode === 0;
-  } catch (error) {
-    console.log(`[Snapshot] Sandbox health check failed: ${error}`);
-    return false;
+  // Try exec() up to 3 times with increasing delays
+  // The first call wakes the sandbox, subsequent calls verify it's ready
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      debug.snapshot('health-check-attempt', chatId || 'unknown', { attempt });
+      const result = await sandbox.exec('echo "alive"', { timeout: 15000 });
+      debug.snapshot('health-check-result', chatId || 'unknown', {
+        attempt,
+        exitCode: result.exitCode,
+        stdout: result.stdout?.trim(),
+      });
+
+      if (result.exitCode === 0) {
+        timer({ attempt, healthy: true });
+        return true;
+      }
+
+      // If exec succeeded but exit code is non-zero, that's still a failure
+      debug.warn('non-zero-exit', {
+        component: 'Snapshot',
+        chatId,
+        attempt,
+        exitCode: result.exitCode,
+      });
+    } catch (error) {
+      debug.error('health-check-failed', {
+        component: 'Snapshot',
+        chatId,
+        attempt,
+        error: String(error),
+        errorType: (error as Error).constructor?.name,
+      });
+      console.log(`[Snapshot] Exec failed (attempt ${attempt}): ${error}`);
+
+      // If this isn't the last attempt, wait before retrying
+      // First attempt wakes sandbox, give it time to fully wake
+      if (attempt < 3) {
+        const delay = attempt * 1000; // 1s, 2s delays
+        debug.snapshot('retry-delay', chatId || 'unknown', { delayMs: delay });
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
+
+  timer({ attempt: 3, healthy: false });
+  console.log(`[Snapshot] Sandbox health check failed after 3 attempts`);
+  return false;
 }
 
 // Snapshot configuration
 const SNAPSHOT_DIRS = ["/workspace", "/home/claude"];
 const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
 const TAR_TIMEOUT_MS = 60_000; // 60 seconds for tar operations
+
+// Directories to exclude from snapshots
+// /media is R2-mounted and persisted separately - don't include in snapshots
+// Legacy memvid paths excluded since conversation history now lives in R2
+const SNAPSHOT_EXCLUDES: string[] = [
+  "/media",
+  "/media/*",
+  "/home/claude/.memvid",       // Legacy embedding models location (~133MB)
+  "/home/claude/shared/*.mv2",  // Legacy shared conversation memory
+  "/home/claude/private",       // Legacy private user memory directories
+];
+const TAR_EXCLUDE_FLAGS = SNAPSHOT_EXCLUDES.length > 0
+  ? SNAPSHOT_EXCLUDES.map(e => `--exclude='${e}'`).join(" ")
+  : "";
 
 /**
  * POST /snapshot - Create a snapshot of the sandbox filesystem.
@@ -88,8 +146,8 @@ export async function handleSnapshotCreate(
       );
     }
 
-    // Create tar archive
-    const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${dirsToBackup.join(" ")} 2>/dev/null`;
+    // Create tar archive (excluding large caches like .memvid models)
+    const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${TAR_EXCLUDE_FLAGS} ${dirsToBackup.join(" ")} 2>/dev/null`;
     console.log(`[Snapshot] Running: ${tarCmd}`);
 
     const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
@@ -101,48 +159,97 @@ export async function handleSnapshotCreate(
       );
     }
 
-    // Read the tar file as base64
-    const tarFile = await sandbox.readFile(SNAPSHOT_TMP_PATH, {
-      encoding: "base64",
-    });
+    // Generate snapshot key
+    const snapshotKey = getSnapshotKey(chatId, senderId, isGroup);
+    const metadata = {
+      chatId,
+      senderId: senderId || "",
+      isGroup: String(isGroup),
+      createdAt: new Date().toISOString(),
+      directories: dirsToBackup.join(","),
+    };
 
-    if (!tarFile.content) {
+    // Check file size to decide between streaming and buffered upload
+    let snapshotSize: number;
+    try {
+      snapshotSize = await getFileSize(sandbox, SNAPSHOT_TMP_PATH);
+      console.log(`[Snapshot] Tar file size: ${snapshotSize} bytes`);
+    } catch (sizeError) {
+      console.error(`[Snapshot] Failed to get file size: ${sizeError}`);
       return Response.json(
-        { error: "Failed to read snapshot file" },
+        { error: "Failed to check snapshot size" },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
-    // Decode base64 to binary
-    const binaryData = Uint8Array.from(atob(tarFile.content), (c) =>
-      c.charCodeAt(0)
-    );
+    let uploadResult: { size: number; parts?: number };
 
-    // Generate snapshot key and upload to R2
-    const snapshotKey = getSnapshotKey(chatId, senderId, isGroup);
-    await ctx.env.SNAPSHOTS.put(snapshotKey, binaryData, {
-      customMetadata: {
-        chatId,
-        senderId: senderId || "",
-        isGroup: String(isGroup),
-        createdAt: new Date().toISOString(),
-        directories: dirsToBackup.join(","),
-      },
-    });
+    if (snapshotSize > STREAMING_THRESHOLD) {
+      // Large file: use streaming multipart upload
+      console.log(`[Snapshot] Using streaming upload for ${snapshotSize} bytes (> ${STREAMING_THRESHOLD})`);
 
-    // Clean up temp file
-    await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
+      try {
+        uploadResult = await uploadLargeFileToR2(
+          sandbox,
+          SNAPSHOT_TMP_PATH,
+          ctx.env.SNAPSHOTS,
+          snapshotKey,
+          metadata,
+          chatId
+        );
+      } finally {
+        // Clean up temp file
+        await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
+      }
 
-    console.log(
-      `[Snapshot] Created snapshot for chat ${chatId}: ${snapshotKey} (${binaryData.length} bytes)`
-    );
+      console.log(
+        `[Snapshot] Created snapshot (streaming) for chat ${chatId}: ${snapshotKey} (${uploadResult.size} bytes, ${uploadResult.parts} parts)`
+      );
+
+    } else {
+      // Small file: use buffered upload (existing approach)
+      console.log(`[Snapshot] Using buffered upload for ${snapshotSize} bytes (<= ${STREAMING_THRESHOLD})`);
+
+      // Read the tar file as base64
+      const tarFile = await sandbox.readFile(SNAPSHOT_TMP_PATH, {
+        encoding: "base64",
+      });
+
+      if (!tarFile.content) {
+        return Response.json(
+          { error: "Failed to read snapshot file" },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+
+      // Decode base64 to binary
+      const binaryData = Uint8Array.from(atob(tarFile.content), (c) =>
+        c.charCodeAt(0)
+      );
+
+      // Upload to R2
+      await ctx.env.SNAPSHOTS.put(snapshotKey, binaryData, {
+        customMetadata: metadata,
+      });
+
+      // Clean up temp file
+      await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
+
+      uploadResult = { size: binaryData.length };
+
+      console.log(
+        `[Snapshot] Created snapshot (buffered) for chat ${chatId}: ${snapshotKey} (${binaryData.length} bytes)`
+      );
+    }
 
     return Response.json(
       {
         success: true,
         key: snapshotKey,
-        size: binaryData.length,
+        size: uploadResult.size,
+        parts: uploadResult.parts,
         directories: dirsToBackup,
+        streaming: snapshotSize > STREAMING_THRESHOLD,
       },
       { headers: CORS_HEADERS }
     );
@@ -290,9 +397,18 @@ interface RestoreRequest {
 export async function handleSnapshotRestore(
   ctx: HandlerContext
 ): Promise<Response> {
+  const timer = debug.timer('Snapshot', 'restore');
+
   try {
     const body = (await ctx.request.json()) as RestoreRequest;
     const { chatId, senderId, isGroup, snapshotKey, markAsLatest } = body;
+
+    debug.snapshot('restore-start', chatId, {
+      senderId,
+      isGroup,
+      snapshotKey,
+      markAsLatest,
+    });
 
     if (!chatId || !snapshotKey) {
       return Response.json(
@@ -304,6 +420,7 @@ export async function handleSnapshotRestore(
     // Validate snapshot access
     const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
     if (!snapshotKey.startsWith(prefix)) {
+      debug.warn('access-denied', { component: 'Snapshot', chatId, snapshotKey, prefix });
       return Response.json(
         { error: "Access denied to this snapshot" },
         { status: 403, headers: CORS_HEADERS }
@@ -318,10 +435,11 @@ export async function handleSnapshotRestore(
     });
 
     // Step 1: Download snapshot from R2 first (doesn't need sandbox)
-    console.log(`[Snapshot] Downloading snapshot from R2...`);
+    debug.snapshot('r2-download-start', chatId, { snapshotKey });
     const object = await ctx.env.SNAPSHOTS.get(snapshotKey);
 
     if (!object) {
+      debug.error('r2-not-found', { component: 'Snapshot', chatId, snapshotKey });
       return Response.json(
         { error: "Snapshot not found in R2", snapshotKey },
         { status: 404, headers: CORS_HEADERS }
@@ -329,35 +447,74 @@ export async function handleSnapshotRestore(
     }
 
     const arrayBuffer = await object.arrayBuffer();
-    console.log(`[Snapshot] Downloaded ${arrayBuffer.byteLength} bytes from R2`);
+    debug.snapshot('r2-download-complete', chatId, { size: arrayBuffer.byteLength });
 
     // Step 2: Wake up the sandbox with a health check
-    console.log(`[Snapshot] Ensuring sandbox is awake...`);
-    const isHealthy = await ensureSandboxHealthy(sandbox);
+    debug.snapshot('health-check-start', chatId, {});
+    const isHealthy = await ensureSandboxHealthy(sandbox, chatId);
+    debug.snapshot('health-check-result', chatId, { isHealthy });
+
     if (!isHealthy) {
-      console.log(`[Snapshot] Sandbox not healthy, attempting to wake...`);
-      // Try once more - the first call may have woken it
-      const retry = await ensureSandboxHealthy(sandbox);
-      if (!retry) {
-        return Response.json(
-          { error: "Unable to wake sandbox for restore" },
-          { status: 500, headers: CORS_HEADERS }
-        );
-      }
+      debug.error('sandbox-unhealthy', { component: 'Snapshot', chatId });
+      return Response.json(
+        {
+          error: "Unable to wake sandbox for restore",
+          detail: "The sandbox appears to be sleeping or in a corrupted state.",
+          suggestion: "Try restarting the sandbox with /restart endpoint, or check if the sandbox was used recently.",
+          chatId,
+        },
+        { status: 503, headers: CORS_HEADERS }
+      );
     }
 
-    // Step 3: Write snapshot to container using SDK's writeFile (same approach as ask.ts)
-    // The SDK handles base64 encoding internally
-    console.log(`[Snapshot] Writing snapshot to container (${arrayBuffer.byteLength} bytes)...`);
-    const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+    // Step 3: Write snapshot to container
+    // Use streaming download for large files, buffered for small files
+    const snapshotSize = arrayBuffer.byteLength;
+    debug.snapshot('write-snapshot-start', chatId, { size: snapshotSize });
 
     try {
-      await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
-        encoding: "base64",
-      });
-      console.log(`[Snapshot] Snapshot file written successfully`);
+      if (snapshotSize > STREAMING_THRESHOLD) {
+        // Large file: use streaming download (chunked writes)
+        debug.snapshot('write-snapshot-streaming', chatId, { size: snapshotSize });
+
+        // Re-fetch the object to get a fresh body stream
+        // (we already consumed arrayBuffer above for small file compatibility)
+        const freshObject = await ctx.env.SNAPSHOTS.get(snapshotKey);
+        if (!freshObject) {
+          throw new Error("Snapshot disappeared during restore");
+        }
+
+        await downloadLargeFileFromR2(sandbox, freshObject, SNAPSHOT_TMP_PATH, chatId);
+        debug.snapshot('write-snapshot-streaming-success', chatId, {});
+
+      } else {
+        // Small file: use buffered write (existing approach)
+        debug.snapshot('write-snapshot-buffered', chatId, { size: snapshotSize });
+
+        // Convert ArrayBuffer to base64 in chunks to avoid stack overflow
+        // (spreading large arrays as function arguments causes "Maximum call stack size exceeded")
+        const bytes = new Uint8Array(arrayBuffer);
+        const CHUNK_SIZE = 32768; // 32KB chunks
+        let binaryString = '';
+        for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+          const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+          binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        const base64Data = btoa(binaryString);
+        debug.snapshot('base64-encoded', chatId, { base64Length: base64Data.length });
+
+        await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
+          encoding: "base64",
+        });
+        debug.snapshot('write-snapshot-buffered-success', chatId, {});
+      }
     } catch (writeError) {
-      console.error(`[Snapshot] Failed to write snapshot file:`, writeError);
+      debug.error('write-snapshot-failed', {
+        component: 'Snapshot',
+        chatId,
+        error: String(writeError),
+        errorType: (writeError as Error).constructor?.name,
+      });
       return Response.json(
         { error: "Failed to write snapshot to container", detail: String(writeError) },
         { status: 500, headers: CORS_HEADERS }
@@ -365,86 +522,106 @@ export async function handleSnapshotRestore(
     }
 
     // Step 4: Clear directories and extract in sequence
-    console.log(`[Snapshot] Clearing directories and extracting...`);
+    debug.snapshot('extract-start', chatId, { dirs: SNAPSHOT_DIRS });
     const clearCmd = SNAPSHOT_DIRS.map(dir => `rm -rf ${dir}/* ${dir}/.[!.]* 2>/dev/null`).join("; ");
     const restoreResult = await sandbox.exec(
       `${clearCmd}; cd / && tar -xzf ${SNAPSHOT_TMP_PATH} && rm -f ${SNAPSHOT_TMP_PATH}`,
       { timeout: TAR_TIMEOUT_MS }
     );
+    debug.snapshot('extract-complete', chatId, {
+      exitCode: restoreResult.exitCode,
+      stderrPreview: restoreResult.stderr?.slice(0, 200),
+    });
 
     if (restoreResult.exitCode !== 0) {
-      console.error(`[Snapshot] Restore failed: ${restoreResult.stderr}`);
+      debug.error('extract-failed', {
+        component: 'Snapshot',
+        chatId,
+        exitCode: restoreResult.exitCode,
+        stderr: restoreResult.stderr,
+      });
       return Response.json(
         { error: "Failed to restore snapshot", detail: restoreResult.stderr },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
-    console.log(`[Snapshot] Restore complete for chat ${chatId}`);
+    // Verify filesystem state after restore
+    try {
+      const workspaceCheck = await sandbox.exec('ls -la /workspace 2>/dev/null | head -10', { timeout: 5000 });
+      const homeCheck = await sandbox.exec('ls -la /home/claude 2>/dev/null | head -10', { timeout: 5000 });
+      debug.snapshot('verify-filesystem', chatId, {
+        workspaceFiles: workspaceCheck.stdout?.slice(0, 300),
+        homeFiles: homeCheck.stdout?.slice(0, 300),
+      });
+    } catch (verifyError) {
+      debug.warn('verify-filesystem-failed', {
+        component: 'Snapshot',
+        chatId,
+        error: String(verifyError),
+      });
+    }
 
-    // Step 5: Optionally create new snapshot to mark as latest
+    // Step 5: Optionally mark this snapshot as "latest" by copying to the latest key in R2
+    // We copy the ORIGINAL snapshot directly instead of re-tarring from container,
+    // which avoids session staleness issues that can occur after large extractions.
     let newSnapshotKey: string | undefined;
+    let markAsLatestError: string | undefined;
+
     if (markAsLatest) {
-      console.log(`[Snapshot] Creating new snapshot to mark as latest...`);
+      debug.snapshot('mark-latest-start', chatId, {});
+      try {
+        // Simply copy the restored snapshot to the "latest" key in R2
+        // This is much more reliable than re-creating a tar from the container
+        newSnapshotKey = getSnapshotKey(chatId, senderId, isGroup);
 
-      // Check which directories have content
-      const dirsToBackup: string[] = [];
-      for (const dir of SNAPSHOT_DIRS) {
-        const checkResult = await sandbox.exec(`test -d ${dir} && ls -A ${dir}`, {
-          timeout: 5000,
+        // Use the already-downloaded arrayBuffer (we still have it from Step 2)
+        await ctx.env.SNAPSHOTS.put(newSnapshotKey, arrayBuffer, {
+          customMetadata: {
+            chatId,
+            senderId: senderId || "",
+            isGroup: String(isGroup),
+            createdAt: new Date().toISOString(),
+            reason: "restore-mark-latest",
+            restoredFrom: snapshotKey,
+            copiedFromTimestamp: object.uploaded?.toISOString() || "unknown",
+          },
         });
-        if (checkResult.exitCode === 0 && checkResult.stdout.trim()) {
-          dirsToBackup.push(dir);
-        }
-      }
 
-      if (dirsToBackup.length > 0) {
-        // Create tar archive
-        const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${dirsToBackup.join(" ")} 2>/dev/null`;
-        const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
-
-        if (tarResult.exitCode === 0) {
-          // Read and upload
-          const tarFile = await sandbox.readFile(SNAPSHOT_TMP_PATH, {
-            encoding: "base64",
-          });
-
-          if (tarFile.content) {
-            const binaryData = Uint8Array.from(atob(tarFile.content), (c) =>
-              c.charCodeAt(0)
-            );
-
-            newSnapshotKey = getSnapshotKey(chatId, senderId, isGroup);
-            await ctx.env.SNAPSHOTS.put(newSnapshotKey, binaryData, {
-              customMetadata: {
-                chatId,
-                senderId: senderId || "",
-                isGroup: String(isGroup),
-                createdAt: new Date().toISOString(),
-                directories: dirsToBackup.join(","),
-                reason: "restore-mark-latest",
-                restoredFrom: snapshotKey,
-              },
-            });
-
-            console.log(`[Snapshot] Created new snapshot: ${newSnapshotKey}`);
-          }
-        }
-
-        // Clean up
-        await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
+        debug.snapshot('mark-latest-success', chatId, { newSnapshotKey, copiedFrom: snapshotKey });
+      } catch (markError) {
+        debug.error('mark-latest-failed', {
+          component: 'Snapshot',
+          chatId,
+          error: markError instanceof Error ? markError.message : String(markError),
+        });
+        markAsLatestError = markError instanceof Error ? markError.message : String(markError);
       }
     }
 
+    // Clear terminal URL cache since container state changed
+    // Note: We do NOT destroy the sandbox here - that would wipe the restored files!
+    // The stale session issue may occur, but users can click "Restart Sandbox" if needed.
+    const sandboxId = `chat-${chatId}`;
+    clearTerminalUrlCache(sandboxId);
+
+    timer({ success: true, restoredFrom: snapshotKey, newSnapshotKey });
     return Response.json(
       {
         success: true,
         restoredFrom: snapshotKey,
         newSnapshotKey,
+        markAsLatestError,
       },
       { headers: CORS_HEADERS }
     );
   } catch (error) {
+    debug.error('restore-error', {
+      component: 'Snapshot',
+      error: error instanceof Error ? error.message : String(error),
+      errorType: (error as Error).constructor?.name,
+      stack: (error as Error).stack?.split('\n').slice(0, 3).join(' | '),
+    });
     console.error("[Snapshot] Restore error:", error);
     return Response.json(
       { error: error instanceof Error ? error.message : "Unknown error" },

@@ -31,7 +31,9 @@ RUN wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
 RUN apt-get update && apt-get install -y jq uuid-runtime ttyd && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user (Claude Code refuses --dangerously-skip-permissions as root)
-RUN useradd -m -s /bin/bash claude
+# Add to fuse group for R2 bucket mounting via s3fs
+RUN useradd -m -s /bin/bash claude && \
+    (getent group fuse && usermod -aG fuse claude || true)
 
 # Create workspace directory with proper ownership
 RUN mkdir -p /workspace/files && chown -R claude:claude /workspace
@@ -46,6 +48,9 @@ RUN mkdir -p /home/claude/.claude && chown -R claude:claude /home/claude/.claude
 RUN mkdir -p /home/claude/shared/lists \
     && mkdir -p /home/claude/private \
     && chown -R claude:claude /home/claude/shared /home/claude/private
+
+# Create /media mount point for R2 bucket (s3fs requires existing directory with write perms)
+RUN mkdir -p /media && chown claude:claude /media
 
 # Copy Claude Code settings (disallowedPaths protects /tmp/protected/)
 COPY --chown=claude:claude .claude/settings.json /home/claude/.claude/settings.json

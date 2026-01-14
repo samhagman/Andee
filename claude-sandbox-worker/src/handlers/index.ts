@@ -33,4 +33,6 @@ export {
   handleTerminal,
   handleTerminalUrl,
   handleWsContainerTest,
+  clearTerminalUrlCache,
+  clearAllTerminalUrlCaches,
 } from "./ide";

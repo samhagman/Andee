@@ -185,8 +185,17 @@ async function main() {
     process.exit(0);
   }
 
-  // Create HTTP server
-  const server = http.createServer();
+  // Create HTTP server with request handler for health checks
+  // Important: Without this, HTTP requests hang forever and containerFetch times out
+  const server = http.createServer((req, res) => {
+    // Respond to any HTTP request (health checks, etc.)
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      service: 'ws-terminal',
+      message: 'WebSocket terminal server. Connect via WebSocket for terminal access.'
+    }));
+  });
 
   // Try to bind with retries
   const bound = await tryBindWithRetries(server);
@@ -204,8 +213,22 @@ async function main() {
     console.log(`[ws-terminal] WebSocket server READY on port ${PORT}`);
   });
 
-  wss.on('connection', (ws) => {
-    console.log('[ws-terminal] Client connected');
+  wss.on('connection', (ws, req) => {
+    console.log(`[ws-terminal] Client connected from ${req.socket.remoteAddress}`);
+    console.log(`[ws-terminal] Total active connections: ${wss.clients.size}`);
+    
+    // Ping/pong heartbeat to keep connection alive through Cloudflare proxy
+    // Cloudflare may close idle WebSocket connections without heartbeat
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === 1) {
+        ws.ping();
+        console.log('[ws-terminal] Sent ping');
+      }
+    }, 10000); // Ping every 10 seconds (more frequent for debugging)
+    
+    ws.on('pong', () => {
+      console.log('[ws-terminal] Received pong');
+    });
 
     // Create PTY shell - proper terminal emulation
     const shell = pty.spawn('bash', [], {
@@ -260,13 +283,17 @@ async function main() {
       }
     });
 
-    ws.on('close', () => {
-      console.log('[ws-terminal] Client disconnected');
+    ws.on('close', (code, reason) => {
+      console.log(`[ws-terminal] Client disconnected (code: ${code}, reason: ${reason || 'none'})`);
+      console.log(`[ws-terminal] Remaining connections: ${wss.clients.size - 1}`);
+      clearInterval(pingInterval);
       shell.kill();
     });
 
     ws.on('error', (err) => {
-      console.error('[ws-terminal] WebSocket error:', err);
+      console.error('[ws-terminal] WebSocket error:', err.message);
+      console.error('[ws-terminal] Error stack:', err.stack);
+      clearInterval(pingInterval);
       shell.kill();
     });
   });

@@ -10,7 +10,17 @@ import { PreviewBanner } from "./components/PreviewBanner";
 import { showConfirmModal } from "./components/ConfirmModal";
 import { showErrorModal } from "./components/ErrorModal";
 import { restoreSnapshot } from "./lib/api";
+import { debug, AndeeDebug, enableFetchLogging } from "./lib/debug";
 import type { Sandbox, ConnectionStatus, PreviewState } from "./lib/types";
+
+// Enable debug fetch logging
+enableFetchLogging();
+
+// Log debug mode status on init
+if (AndeeDebug.isEnabled()) {
+  console.log('%c🔧 Andee Debug Mode is ENABLED', 'color: #81c784; font-weight: bold');
+  console.log('Disable with: AndeeDebug.disable()');
+}
 
 // Global state
 let currentSandbox: Sandbox | null = null;
@@ -197,7 +207,11 @@ async function handleRestoreFromPreview(): Promise<void> {
 async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promise<void> {
   if (!currentSandbox) return;
 
-  console.log(`[IDE] Restoring snapshot: ${snapshotKey}, markAsLatest: ${markAsLatest}`);
+  debug.snapshot('restore-start', {
+    snapshotKey,
+    markAsLatest,
+    chatId: currentSandbox.chatId,
+  });
 
   try {
     // Disconnect terminal before restore
@@ -214,6 +228,13 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
       markAsLatest,
     });
 
+    debug.snapshot('restore-result', {
+      success: result.success,
+      restoredFrom: result.restoredFrom,
+      newSnapshotKey: result.newSnapshotKey,
+      error: result.error,
+    });
+
     if (result.success) {
       console.log(`[IDE] Restore successful, restoredFrom: ${result.restoredFrom}`);
       if (result.newSnapshotKey) {
@@ -225,10 +246,13 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
         await handleExitPreview();
       }
 
-      // Refresh file tree
+      // Wait a moment for restore to fully complete, then refresh file tree
+      debug.snapshot('refresh-start', {});
+      await new Promise(resolve => setTimeout(resolve, 500));
       if (fileTree && currentSandbox) {
         await fileTree.loadDirectory(currentSandbox.id, "/");
       }
+      debug.snapshot('refresh-complete', {});
 
       // Refresh snapshot panel
       if (snapshotPanel) {
@@ -240,6 +264,7 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
         terminal.connect(currentSandbox.id);
       }
     } else {
+      debug.snapshot('restore-failed', { error: result.error });
       console.error("[IDE] Restore failed:", result.error);
       await showErrorModal({
         title: "Restore Failed",
@@ -248,6 +273,9 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
       });
     }
   } catch (error) {
+    debug.snapshot('restore-error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     console.error("[IDE] Restore error:", error);
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

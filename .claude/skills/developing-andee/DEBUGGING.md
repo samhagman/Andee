@@ -337,8 +337,57 @@ npx wrangler r2 object get andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00
 ### Restore Behavior
 
 - Snapshots are automatically restored when a fresh container starts
-- Restore happens in the `/ask` endpoint
+- Restore happens in both `/ask` endpoint (Telegram messages) and `/files` endpoint (IDE)
 - The latest snapshot (by timestamp) is always used
+- IDE uses marker file `/tmp/.ide-initialized` to track if auto-restore already happened
+
+### IDE Snapshot Restore
+
+The Sandbox IDE supports browsing and restoring historical snapshots via the 📷 button:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  IDE SNAPSHOT RESTORE                                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  👁 Preview: Browse snapshot without restoring                          │
+│     - Downloads tar to /tmp, lists with tar -tzf                        │
+│     - Navigate directories, view file contents                          │
+│     - Useful for checking "what's in this old snapshot?"                │
+│                                                                         │
+│  ↩ Restore: Replace container files with snapshot                       │
+│     1. Download snapshot from R2                                        │
+│     2. Clear /workspace/* and /home/claude/*                            │
+│     3. Extract tar.gz to container                                      │
+│     4. Copy snapshot to R2 as "latest" (markAsLatest)                   │
+│     5. Session may become stale → click "Restart Sandbox"               │
+│     6. Fresh container auto-restores from R2 latest                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Restore Edge Cases & Gotchas
+
+| Issue | Symptom | Solution |
+|-------|---------|----------|
+| Large snapshot stack overflow | `Maximum call stack size exceeded` on restore/preview | Use chunked base64 (32KB chunks), not `btoa(String.fromCharCode(...new Uint8Array(arr)))` |
+| Session stale after restore | `Unknown Error, TODO` when browsing files | Click "Restart Sandbox" - fresh container will auto-restore from R2 |
+| Files lost after restart | Files were there, now gone | This was a bug (now fixed). `handleFiles()` now auto-restores from R2 on fresh containers |
+| markAsLatest failed | Response shows `markAsLatestError` | markAsLatest now copies original snapshot to R2 instead of re-tarring (avoids session staleness) |
+| Preview fails on large files | 500 error on `/snapshot-files` | Same chunked base64 fix needed in snapshot-preview.ts |
+
+### Restore Endpoints
+
+```bash
+# Preview snapshot contents (without restoring)
+curl "https://claude-sandbox-worker.../snapshot-files?sandbox=chat-X&snapshotKey=Y&path=/&chatId=X&senderId=Y&isGroup=Z"
+
+# Restore snapshot (replaces container files)
+curl -X POST "https://claude-sandbox-worker.../restore" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $ANDEE_API_KEY" \
+  -d '{"chatId":"X","senderId":"Y","isGroup":false,"snapshotKey":"snapshots/Y/X/2026-01-12T04-16-53-540Z.tar.gz","markAsLatest":true}'
+```
 
 ---
 
@@ -548,6 +597,35 @@ grep "sleepAfter" claude-sandbox-worker/src/index.ts  # Should be "1h"
 1. Check Dockerfile syntax
 2. Verify npm packages are available
 3. Check `npm run dev` output for specific errors
+
+### Issue: IDE snapshot restore loses files after restart
+
+**Cause:** Before the fix, fresh containers didn't auto-restore from R2. The restore extracted files, but when you clicked "Restart Sandbox" to fix the stale session, the fresh container started empty.
+
+**Solution (now automatic):** `handleFiles()` in ide.ts now checks for `/tmp/.ide-initialized` marker. If missing, it auto-restores from the latest R2 snapshot before listing files.
+
+**If files are still missing after restore:**
+1. Check network requests - did `markAsLatest` succeed? (look for `newSnapshotKey` in response)
+2. If `markAsLatestError` is present, the snapshot wasn't copied to R2 as latest
+3. Try restoring again with fresh browser (clear any cached state)
+
+### Issue: "Maximum call stack size exceeded" on large snapshots
+
+**Cause:** Using spread operator on large Uint8Array: `btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))`. JavaScript function arguments have a limit (~32KB-65KB depending on engine).
+
+**Solution:** Build binary string in chunks, then btoa once:
+```typescript
+const bytes = new Uint8Array(arrayBuffer);
+const CHUNK_SIZE = 32768; // 32KB
+let binaryString = '';
+for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+  const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+  binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+}
+const base64Data = btoa(binaryString);
+```
+
+**Affected files:** `snapshot.ts`, `snapshot-preview.ts`, `ide.ts` (all now fixed)
 
 ### Issue: Voice message returns empty transcription
 

@@ -21,6 +21,11 @@ import {
   SERVER_STARTUP_TIMEOUT_MS,
 } from "../../../shared/config";
 import { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT } from "../scripts";
+import {
+  mountMediaBucket,
+  saveAllMedia,
+  type MediaStorageResult,
+} from "../lib/media";
 
 // Snapshot configuration
 const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
@@ -187,6 +192,7 @@ export async function handleAsk(
       audioDurationSeconds,
       images,
       mediaGroupId,
+      document,
     } = body;
 
     // Validate required fields
@@ -201,10 +207,11 @@ export async function handleAsk(
     const hasText = Boolean(message);
     const hasAudio = Boolean(audioBase64);
     const hasImages = images && images.length > 0;
+    const hasDocument = Boolean(document);
 
-    if (!hasText && !hasAudio && !hasImages) {
+    if (!hasText && !hasAudio && !hasImages && !hasDocument) {
       return Response.json(
-        { error: "Must provide message, audioBase64, or images" },
+        { error: "Must provide message, audioBase64, images, or document" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
@@ -259,14 +266,42 @@ export async function handleAsk(
       );
     }
 
-    const inputType = audioBase64 ? "voice" : hasImages ? "photo" : "text";
+    const inputType = audioBase64 ? "voice" : hasImages ? "photo" : hasDocument ? "document" : "text";
     const imageInfo = hasImages ? ` (${images!.length} image(s)${mediaGroupId ? `, album: ${mediaGroupId}` : ""})` : "";
-    console.log(`[${chatId}] Processing ${inputType} message${imageInfo} (senderId: ${senderId}, isGroup: ${isGroup})`);
+    const docInfo = hasDocument ? ` (${document!.fileName})` : "";
+    console.log(`[${chatId}] Processing ${inputType} message${imageInfo}${docInfo} (senderId: ${senderId}, isGroup: ${isGroup})`);
 
     // Get sandbox with configurable sleep timeout
     const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
       sleepAfter: SANDBOX_SLEEP_AFTER,
     });
+
+    // Mount R2 media bucket (or fallback to /tmp/media for local dev)
+    let isLocalDev = false;
+    let mediaPaths: MediaStorageResult[] = [];
+    try {
+      const mounted = await mountMediaBucket(sandbox, ctx.env);
+      isLocalDev = !mounted;
+    } catch (err) {
+      console.warn(`[${chatId}] Media mount failed, using local fallback:`, err);
+      isLocalDev = true;
+    }
+
+    // Save incoming media to storage (photos, voice, documents)
+    const hasMedia = hasImages || audioBase64 || hasDocument;
+    if (hasMedia && senderId) {
+      try {
+        mediaPaths = await saveAllMedia(sandbox, chatId, senderId, isLocalDev, {
+          images,
+          audioBase64,
+          document,
+        });
+        console.log(`[${chatId}] Saved ${mediaPaths.length} media file(s) to ${isLocalDev ? "/tmp/media" : "/media"}`);
+      } catch (err) {
+        console.error(`[${chatId}] Media save failed (continuing without):`, err);
+        // Continue anyway - media storage is an enhancement, not required
+      }
+    }
 
     // Send typing indicator
     await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
@@ -364,6 +399,13 @@ export async function handleAsk(
       apiKey: ctx.env.ANDEE_API_KEY,
       images,
       mediaGroupId,
+      document,
+      // Media paths for artifact integration (stored in /media or /tmp/media)
+      mediaPaths: mediaPaths.map((m) => ({
+        path: m.path,
+        type: m.type,
+        originalName: m.originalName,
+      })),
     });
 
     // Write payload to temp file (avoids "Argument list too long" for large payloads)
@@ -397,6 +439,12 @@ export async function handleAsk(
           apiKey: ctx.env.ANDEE_API_KEY,
           images,
           mediaGroupId,
+          document,
+          mediaPaths: mediaPaths.map((m) => ({
+            path: m.path,
+            type: m.type,
+            originalName: m.originalName,
+          })),
         })
       );
 

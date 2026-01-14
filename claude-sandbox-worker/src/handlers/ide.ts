@@ -9,8 +9,140 @@
  * - WS /terminal - WebSocket terminal via ttyd
  */
 
-import { getSandbox } from "@cloudflare/sandbox";
-import { CORS_HEADERS, HandlerContext } from "../types";
+import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { CORS_HEADERS, HandlerContext, Env, getSnapshotPrefix } from "../types";
+import { debug } from "../lib/debug";
+import { downloadLargeFileFromR2, STREAMING_THRESHOLD } from "../lib/streaming";
+
+// Auto-restore configuration
+const IDE_INIT_MARKER = "/tmp/.ide-initialized";
+const SNAPSHOT_TMP_PATH = "/tmp/restore.tar.gz";
+const TAR_TIMEOUT_MS = 60_000;
+// Skip auto-restore for snapshots larger than this (would timeout)
+// User can manually restore from snapshot panel
+const MAX_AUTO_RESTORE_SIZE = 10 * 1024 * 1024; // 10MB
+
+/**
+ * Check if container needs initialization and restore from R2 if so.
+ * Returns true if restore happened, false otherwise.
+ */
+async function maybeAutoRestore(
+  sandbox: Sandbox,
+  sandboxId: string,
+  env: Env
+): Promise<boolean> {
+  // Parse chatId and isGroup from sandboxId (format: chat-{chatId} or chat--{groupId})
+  const chatId = sandboxId.replace(/^chat-/, "");
+  const isGroup = chatId.startsWith("-");
+  const senderId = isGroup ? "groups" : undefined;
+
+  // Check if already initialized
+  const markerCheck = await sandbox.exec(`test -f ${IDE_INIT_MARKER} && echo "EXISTS"`, { timeout: 5000 });
+  if (markerCheck.stdout.includes("EXISTS")) {
+    debug.ide("auto-restore-skipped", sandboxId, { reason: "already initialized" });
+    return false;
+  }
+
+  // Check for R2 snapshot
+  if (!env.SNAPSHOTS) {
+    debug.ide("auto-restore-skipped", sandboxId, { reason: "no SNAPSHOTS binding" });
+    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+    return false;
+  }
+
+  try {
+    const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
+    const listResult = await env.SNAPSHOTS.list({ prefix });
+
+    if (listResult.objects.length === 0) {
+      debug.ide("auto-restore-skipped", sandboxId, { reason: "no snapshots found", prefix });
+      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+      return false;
+    }
+
+    // Get latest snapshot
+    const latestKey = listResult.objects.sort((a, b) => b.key.localeCompare(a.key))[0].key;
+    debug.ide("auto-restore-start", sandboxId, { snapshotKey: latestKey });
+
+    // Download from R2
+    const object = await env.SNAPSHOTS.get(latestKey);
+    if (!object) {
+      debug.ide("auto-restore-skipped", sandboxId, { reason: "snapshot not found in R2" });
+      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+      return false;
+    }
+
+    const snapshotSize = object.size;
+    debug.ide("auto-restore-size", sandboxId, { snapshotSize, threshold: STREAMING_THRESHOLD });
+
+    // Skip auto-restore for very large snapshots (would timeout)
+    if (snapshotSize > MAX_AUTO_RESTORE_SIZE) {
+      debug.ide("auto-restore-skipped", sandboxId, {
+        reason: "snapshot too large",
+        snapshotSize,
+        maxSize: MAX_AUTO_RESTORE_SIZE,
+      });
+      console.log(
+        `[IDE] Skipping auto-restore for ${sandboxId}: snapshot too large ` +
+        `(${(snapshotSize / (1024 * 1024)).toFixed(1)}MB > ${MAX_AUTO_RESTORE_SIZE / (1024 * 1024)}MB). ` +
+        `Use manual restore from snapshot panel.`
+      );
+      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+      return false;
+    }
+
+    // Use streaming for large snapshots (>25MB) to avoid 32MB RPC limit
+    if (snapshotSize > STREAMING_THRESHOLD) {
+      debug.ide("auto-restore-streaming", sandboxId, { snapshotSize });
+      console.log(`[IDE] Using streaming download for ${sandboxId} (${snapshotSize} bytes)`);
+      await downloadLargeFileFromR2(sandbox, object, SNAPSHOT_TMP_PATH, chatId);
+    } else {
+      // Buffered approach for smaller snapshots
+      const arrayBuffer = await object.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      const CHUNK_SIZE = 32768;
+      let binaryString = "";
+      for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+        binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+      }
+      const base64Data = btoa(binaryString);
+      await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, { encoding: "base64" });
+    }
+
+    // Extract the snapshot
+    const extractResult = await sandbox.exec(
+      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH} && rm -f ${SNAPSHOT_TMP_PATH}`,
+      { timeout: TAR_TIMEOUT_MS }
+    );
+
+    if (extractResult.exitCode !== 0) {
+      debug.error("auto-restore-extract-failed", {
+        component: "IDE",
+        sandboxId,
+        exitCode: extractResult.exitCode,
+        stderr: extractResult.stderr,
+      });
+      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+      return false;
+    }
+
+    // Mark as initialized
+    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
+    debug.ide("auto-restore-success", sandboxId, { snapshotKey: latestKey, size: snapshotSize });
+    console.log(`[IDE] Auto-restored ${sandboxId} from ${latestKey} (${snapshotSize} bytes)`);
+    return true;
+  } catch (error) {
+    debug.error("auto-restore-error", {
+      component: "IDE",
+      sandboxId,
+      error: String(error),
+    });
+    // Create marker anyway to avoid retry loops
+    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 }).catch(() => {});
+    return false;
+  }
+}
 
 // Known user ID → friendly name mappings
 // TODO: Move to environment variable or separate config
@@ -23,6 +155,32 @@ const USER_NAMES: Record<string, string> = {
   "-100999999999": "TEST_GROUP",
   groups: "Group Chat",
 };
+
+// Cache for exposed terminal URLs to avoid re-exposing (which invalidates existing connections)
+// Key: sandboxId, Value: { url: string, expiredAt: number }
+// URLs are cached for 55 minutes (sandbox sleeps after 1 hour of inactivity)
+const terminalUrlCache: Map<string, { url: string; expiresAt: number }> = new Map();
+
+/**
+ * Clear the terminal URL cache for a specific sandbox.
+ * Call this when a sandbox is restarted/destroyed to invalidate stale URLs.
+ */
+export function clearTerminalUrlCache(sandboxId: string): void {
+  if (terminalUrlCache.has(sandboxId)) {
+    console.log(`[IDE] Cleared terminal URL cache for ${sandboxId}`);
+    terminalUrlCache.delete(sandboxId);
+  }
+}
+
+/**
+ * Clear all terminal URL caches.
+ * Useful for debugging or when multiple sandboxes might be affected.
+ */
+export function clearAllTerminalUrlCaches(): void {
+  const count = terminalUrlCache.size;
+  terminalUrlCache.clear();
+  console.log(`[IDE] Cleared all terminal URL caches (${count} entries)`);
+}
 
 /**
  * GET /sandboxes - List all available sandboxes from R2 sessions bucket.
@@ -87,6 +245,7 @@ export async function handleSandboxes(ctx: HandlerContext): Promise<Response> {
 export async function handleFiles(ctx: HandlerContext): Promise<Response> {
   const sandboxId = ctx.url.searchParams.get("sandbox");
   const path = ctx.url.searchParams.get("path") || "/workspace";
+  const timer = debug.timer('IDE', 'listFiles', { sandboxId, path });
 
   if (!sandboxId) {
     return Response.json(
@@ -96,14 +255,55 @@ export async function handleFiles(ctx: HandlerContext): Promise<Response> {
   }
 
   try {
+    debug.ide('getSandbox', sandboxId, { path });
     const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
 
-    // Use ls with specific format for parsing
+    // Step 1: Wake the sandbox with listProcesses()
+    debug.ide('listProcesses-start', sandboxId, { reason: 'wake sandbox' });
+    let processes;
+    try {
+      processes = await sandbox.listProcesses();
+      debug.ide('listProcesses-success', sandboxId, {
+        processCount: processes.length,
+        processes: processes.map(p => ({ pid: p.pid, cmd: p.command?.slice(0, 50) })),
+      });
+    } catch (wakeError) {
+      debug.error('listProcesses-failed', {
+        component: 'IDE',
+        sandboxId,
+        error: String(wakeError),
+        errorType: (wakeError as Error).constructor?.name,
+      });
+      // Try to continue anyway - sometimes exec() works even if listProcesses() fails
+    }
+
+    // Step 1.5: Auto-restore from R2 if container is fresh
+    try {
+      await maybeAutoRestore(sandbox, sandboxId, ctx.env);
+    } catch (restoreError) {
+      debug.warn('auto-restore-error', {
+        component: 'IDE',
+        sandboxId,
+        error: String(restoreError),
+      });
+      // Continue even if restore fails
+    }
+
+    // Step 2: Execute ls command
+    debug.ide('exec-start', sandboxId, { command: 'ls -la', path });
     const result = await sandbox.exec(
-      `ls -la --time-style=+%Y-%m-%dT%H:%M:%S ${path} 2>/dev/null || echo "ERROR: Directory not found"`
+      `ls -la --time-style=+%Y-%m-%dT%H:%M:%S ${path} 2>/dev/null || echo "ERROR: Directory not found"`,
+      { timeout: 15000 }
     );
+    debug.ide('exec-complete', sandboxId, {
+      exitCode: result.exitCode,
+      stdoutLen: result.stdout?.length || 0,
+      stderrLen: result.stderr?.length || 0,
+      stdoutPreview: result.stdout?.slice(0, 200),
+    });
 
     if (result.stdout.includes("ERROR:")) {
+      debug.warn('directory-not-found', { component: 'IDE', sandboxId, path });
       return Response.json(
         { error: "Directory not found", path },
         { status: 404, headers: CORS_HEADERS }
@@ -111,12 +311,34 @@ export async function handleFiles(ctx: HandlerContext): Promise<Response> {
     }
 
     const entries = parseLsOutput(result.stdout);
-
+    timer({ entryCount: entries.length });
     return Response.json({ path, entries }, { headers: CORS_HEADERS });
   } catch (error) {
+    const errorDetails = {
+      message: String(error),
+      type: (error as Error).constructor?.name,
+      stack: (error as Error).stack?.split('\n').slice(0, 3).join(' | '),
+    };
+    debug.error('handleFiles-error', {
+      component: 'IDE',
+      sandboxId,
+      path,
+      ...errorDetails,
+    });
     console.error("[IDE] Failed to list files:", error);
+
+    // Provide more detailed error response for debugging
     return Response.json(
-      { error: "Failed to list files", detail: String(error) },
+      {
+        error: "Failed to list files",
+        detail: String(error),
+        sandboxId,
+        path,
+        errorType: errorDetails.type,
+        suggestion: errorDetails.message.includes('Unknown Error')
+          ? 'The sandbox may be in a corrupted state. Try using /restart endpoint to reset it.'
+          : undefined,
+      },
       { status: 500, headers: CORS_HEADERS }
     );
   }
@@ -139,8 +361,16 @@ export async function handleFileRead(ctx: HandlerContext): Promise<Response> {
   try {
     const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
 
-    // Check if file exists and get size
-    const statResult = await sandbox.exec(`stat -c '%s' ${path} 2>/dev/null || echo "NOT_FOUND"`);
+    // CRITICAL: Use listProcesses() to wake the sandbox first
+    console.log(`[IDE] Waking sandbox ${sandboxId} with listProcesses()`);
+    await sandbox.listProcesses();
+    console.log(`[IDE] Sandbox ${sandboxId} awake, reading file ${path}`);
+    
+    // Check if file exists
+    const statResult = await sandbox.exec(`stat -c '%s' ${path} 2>/dev/null || echo "NOT_FOUND"`, {
+      timeout: 10000
+    });
+
     if (statResult.stdout.trim() === "NOT_FOUND") {
       return Response.json(
         { error: "File not found", path },
@@ -156,7 +386,7 @@ export async function handleFileRead(ctx: HandlerContext): Promise<Response> {
     let encoding: "utf-8" | "base64";
 
     if (isBinary) {
-      const result = await sandbox.exec(`base64 ${path}`);
+      const result = await sandbox.exec(`base64 ${path}`, { timeout: 15000 });
       content = result.stdout;
       encoding = "base64";
     } else {
@@ -264,29 +494,29 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
     );
   }
 
-  // Check for WebSocket upgrade header
-  const upgradeHeader = ctx.request.headers.get("Upgrade");
-  const isWebSocketRequest = upgradeHeader?.toLowerCase() === "websocket";
-  console.log(`[IDE] Terminal request - WebSocket upgrade: ${isWebSocketRequest}, Upgrade header: ${upgradeHeader}`);
-
+  // This endpoint now returns the exposed terminal URL
+  // The frontend connects directly to the exposed port via custom domain
+  // This bypasses wsConnect which has issues
+  
   try {
     const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    
+    // Get the custom domain hostname for port exposure
+    // Uses the custom domain andee.samhagman.com
+    const hostname = "andee.samhagman.com";
 
-    // Check if port 8081 is already listening (ws-terminal already running)
+    // Ensure ws-terminal is running before exposing
     const portCheck = await sandbox.exec(
-      "nc -z localhost 8081 && echo 'LISTENING' || echo 'NOT_LISTENING'",
+      "nc -z localhost 8081 && echo 'OK' || echo 'NO'",
       { timeout: 5000 }
     );
-    const isListening = portCheck.stdout.includes("LISTENING") && !portCheck.stdout.includes("NOT_LISTENING");
-    console.log(`[IDE] Port 8081 status: ${isListening ? 'listening' : 'not listening'}`);
-
+    const isListening = portCheck.stdout.includes("OK");
+    console.log(`[IDE] Port 8081 listening: ${isListening}`);
+    
     if (!isListening) {
       console.log(`[IDE] Starting ws-terminal server for sandbox ${sandboxId}`);
-
-      // Start our custom WebSocket terminal server with PTY support
-      // ws-terminal.js handles its own process management (checks for existing instances, retries on EADDRINUSE)
-      // NOTE: NODE_PATH is required so Node.js can find globally installed packages (ws, node-pty)
-      // NOTE: ANTHROPIC_API_KEY is required so `claude` command works in the terminal
+      
+      // Use ws-terminal.js which is compatible with our frontend's ttyd protocol
       const wsTerminal = await sandbox.startProcess(
         "node /home/claude/.claude/scripts/ws-terminal.js",
         {
@@ -299,25 +529,52 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
           },
         }
       );
-
-      // Wait for server to be ready (with longer timeout to allow retries)
+      
       await wsTerminal.waitForPort(8081, { mode: "tcp", timeout: 15000 });
-      console.log(`[IDE] ws-terminal started for sandbox ${sandboxId}`);
+      console.log(`[IDE] ws-terminal ready on port 8081`);
     }
 
-    // Proxy WebSocket to our terminal server
-    if (!isWebSocketRequest) {
-      console.log(`[IDE] Not a WebSocket request - returning error`);
-      return Response.json(
-        { error: "Expected WebSocket upgrade request" },
-        { status: 400, headers: CORS_HEADERS }
-      );
+    // Check if port is already exposed
+    let exposedUrl: string | undefined;
+    
+    const { ports } = await sandbox.getExposedPorts();
+    const existingPort = ports.find(p => p.port === 8081);
+    
+    if (existingPort) {
+      console.log(`[IDE] Port 8081 already exposed at: ${existingPort.exposedAt}`);
+      exposedUrl = existingPort.exposedAt;
+    } else {
+      // Expose the port via custom domain
+      console.log(`[IDE] Exposing port 8081 for sandbox ${sandboxId} on ${hostname}`);
+      const exposed = await sandbox.exposePort(8081, { hostname, name: "terminal" });
+      console.log(`[IDE] exposePort result:`, JSON.stringify(exposed));
+      
+      // The SDK returns { exposedAt: string } but may vary in local dev
+      // Handle both cases
+      exposedUrl = exposed.exposedAt || (exposed as { url?: string }).url;
     }
-
-    console.log(`[IDE] Proxying WebSocket to ws-terminal on port 8081`);
-    const wsResponse = await sandbox.wsConnect(ctx.request, 8081);
-    console.log(`[IDE] wsConnect response status: ${wsResponse.status}`);
-    return wsResponse;
+    
+    if (!exposedUrl) {
+      console.error(`[IDE] No URL available for port 8081`);
+      return Response.json({
+        error: "Failed to get exposed URL",
+        detail: "No URL available for port 8081",
+      }, { status: 500, headers: CORS_HEADERS });
+    }
+    
+    console.log(`[IDE] Terminal exposed at: ${exposedUrl}`);
+    
+    // Return the WebSocket URL for the frontend to connect directly
+    // The URL format is: https://8081-{sandboxId}.{hostname}
+    // Frontend should connect via wss:// to this URL
+    const wsUrl = exposedUrl.replace(/^https?:\/\//, "wss://");
+    
+    return Response.json({
+      success: true,
+      terminalUrl: wsUrl,
+      httpUrl: exposedUrl,
+      sandboxId,
+    }, { headers: CORS_HEADERS });
   } catch (error) {
     console.error("[IDE] Terminal connection failed:", error);
     return Response.json(
@@ -328,9 +585,11 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
 }
 
 /**
- * GET /terminal-url?sandbox=X - Get the exposed URL for terminal access via ttyd.
+ * GET /terminal-url?sandbox=X - Get the exposed URL for terminal access via ws-terminal.
  * Uses exposePort to get a preview URL that the frontend can connect to directly.
- * This bypasses wsConnect which has issues in local dev mode.
+ * This bypasses wsConnect which has issues with WebSocket proxying.
+ * 
+ * REQUIRES: Custom domain with wildcard DNS (e.g., *.andee.samhagman.com)
  */
 export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> {
   const sandboxId = ctx.url.searchParams.get("sandbox");
@@ -345,71 +604,108 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
   try {
     const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
 
-    // Ensure ttyd is running
+    // CRITICAL: Use listProcesses() to wake the sandbox first
+    console.log(`[IDE] Waking sandbox ${sandboxId} with listProcesses()`);
     const processes = await sandbox.listProcesses();
-    console.log(`[IDE] Terminal URL: processes:`, processes.map(p => ({ pid: p.pid, cmd: p.command?.slice(0, 60) })));
+    console.log(`[IDE] Sandbox ${sandboxId} awake, ${processes.length} processes running`);
 
-    const ttydProcess = processes.find(
-      (p) => p.command?.includes("ttyd") && p.command?.includes("--base-path")
+    // Check if ws-terminal is running
+    const wsTerminalProcess = processes.find(p => 
+      p.command?.includes("ws-terminal.js") || p.command?.includes("node /home/claude/.claude/scripts/ws-terminal")
     );
 
-    // Kill any old ttyd without --base-path
-    const badTtyds = processes.filter(
-      (p) => p.command?.includes("ttyd") && !p.command?.includes("--base-path")
-    );
-    for (const bad of badTtyds) {
-      console.log(`[IDE] Killing old ttyd (pid ${bad.pid})`);
-      await sandbox.exec(`kill -9 ${bad.pid}`);
-    }
-
-    if (!ttydProcess) {
-      console.log(`[IDE] Starting ttyd for terminal URL`);
-      const ttyd = await sandbox.startProcess(
-        "ttyd --base-path / -p 8081 /bin/bash",
+    if (!wsTerminalProcess) {
+      console.log(`[IDE] Starting ws-terminal for terminal URL`);
+      const wsTerminal = await sandbox.startProcess(
+        "node /home/claude/.claude/scripts/ws-terminal.js",
         {
           env: {
             HOME: "/home/claude",
             TERM: "xterm-256color",
             PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            NODE_PATH: "/usr/local/lib/node_modules",
+            ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY || "",
           },
         }
       );
-      await ttyd.waitForPort(8081, { mode: "tcp", timeout: 10000 });
-      console.log(`[IDE] ttyd started`);
+      await wsTerminal.waitForPort(8081, { mode: "tcp", timeout: 10000 });
+      console.log(`[IDE] ws-terminal started`);
+    } else {
+      console.log(`[IDE] ws-terminal already running (pid ${wsTerminalProcess.pid})`);
     }
 
-    // Expose port 8081 to get a preview URL
-    const { hostname } = new URL(ctx.request.url);
+    // Use the apex domain for port exposure (single-level subdomain for Universal SSL)
+    // URLs will be: 8081-{sandboxId}-{token}.samhagman.com (covered by *.samhagman.com cert)
+    const customHostname = "samhagman.com";
     let exposedAt: string;
 
-    try {
-      console.log(`[IDE] Exposing port 8081 with hostname: ${hostname}`);
-      const exposed = await sandbox.exposePort(8081, { hostname });
-      console.log(`[IDE] exposePort result:`, JSON.stringify(exposed));
-      // The result has 'url' property in local dev, 'exposedAt' in production
-      exposedAt = (exposed as { url?: string; exposedAt?: string }).url ||
-                  (exposed as { url?: string; exposedAt?: string }).exposedAt ||
-                  `http://localhost:8787/_sandbox/8081-${sandboxId}/`;
-    } catch (exposeError: unknown) {
-      // If port is already exposed, try to get the URL
-      // Note: getExposedPorts has bugs in local dev mode, so we construct the URL manually
-      const errorMsg = exposeError instanceof Error ? exposeError.message : String(exposeError);
-      if (errorMsg.includes("already exposed")) {
-        // In local dev, the exposed URL follows a pattern
-        // For now, return a direct wsConnect URL as fallback
-        console.log(`[IDE] Port 8081 already exposed, using fallback`);
-        // Try constructing the local dev URL pattern
-        exposedAt = `http://localhost:8787/_sandbox/${sandboxId}/8081`;
-      } else {
-        throw exposeError;
+    // Check server-side cache first to avoid re-exposing (which invalidates existing connections)
+    const cached = terminalUrlCache.get(sandboxId);
+    if (cached && cached.expiresAt > Date.now()) {
+      console.log(`[IDE] Using cached terminal URL for ${sandboxId}: ${cached.url}`);
+      exposedAt = cached.url;
+    } else {
+      // Cache miss or expired - need to expose the port
+      // NOTE: getExposedPorts() has a bug where it fails when ports are exposed.
+      // Workaround: Just try to expose the port. If it fails with "already exposed",
+      // unexpose and re-expose to get a fresh URL.
+      try {
+        console.log(`[IDE] Exposing port 8081 with hostname: ${customHostname}`);
+        const exposed = await sandbox.exposePort(8081, { hostname: customHostname });
+        console.log(`[IDE] exposePort result:`, JSON.stringify(exposed));
+        
+        // Handle different response formats from the SDK
+        const exposeResult = exposed as { exposedAt?: string; url?: string };
+        exposedAt = exposeResult.exposedAt || exposeResult.url || "";
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.log(`[IDE] exposePort failed:`, errorMsg);
+        
+        // If port is already exposed, unexpose and re-expose to get fresh URL
+        // This works around the getExposedPorts() bug
+        if (errorMsg.includes("already exposed") || errorMsg.includes("PortAlreadyExposedError")) {
+          console.log(`[IDE] Port already exposed, unexposing and re-exposing`);
+          try {
+            await sandbox.unexposePort(8081);
+            console.log(`[IDE] Unexposed port 8081, now re-exposing`);
+            const exposed = await sandbox.exposePort(8081, { hostname: customHostname });
+            const exposeResult = exposed as { exposedAt?: string; url?: string };
+            exposedAt = exposeResult.exposedAt || exposeResult.url || "";
+            console.log(`[IDE] Re-exposed port 8081 at: ${exposedAt}`);
+          } catch (reexposeError) {
+            console.log(`[IDE] Failed to re-expose:`, reexposeError);
+            throw reexposeError;
+          }
+        } else {
+          throw error;
+        }
       }
+      
+      // Cache the URL for 55 minutes (sandbox sleeps after 1 hour of inactivity)
+      const CACHE_TTL_MS = 55 * 60 * 1000; // 55 minutes
+      terminalUrlCache.set(sandboxId, {
+        url: exposedAt,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
+      console.log(`[IDE] Cached terminal URL for ${sandboxId}`);
     }
+    
+    if (!exposedAt) {
+      throw new Error("Could not get exposed URL for port 8081");
+    }
+
+    // Build the WebSocket URL for the frontend
+    // ws-terminal.js listens on the root path, not /ws
+    const wsUrl = exposedAt.replace(/^https?:\/\//, "wss://");
+
+    console.log(`[IDE] Terminal exposed at: ${exposedAt}, wsUrl: ${wsUrl}`);
 
     return Response.json(
       {
+        success: true,
         terminalUrl: exposedAt,
+        wsUrl: wsUrl,
         sandboxId,
-        wsUrl: exposedAt.replace(/^http/, "ws") + "/ws",
       },
       { headers: CORS_HEADERS }
     );

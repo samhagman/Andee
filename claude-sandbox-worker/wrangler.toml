@@ -2,12 +2,29 @@ name = "claude-sandbox-worker"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
+# Keep workers.dev route active for main API access
+workers_dev = true
+
+# Custom domain for exposed sandbox ports (terminal, web apps, etc.)
+# Uses single-level subdomains for Universal SSL compatibility:
+#   https://8081-chat-999999999.samhagman.com (covered by *.samhagman.com)
+# DNS setup required in Cloudflare Dashboard:
+#   Add A record: * -> 192.0.2.0 (proxied)
+routes = [
+  { pattern = "*.samhagman.com/*", zone_name = "samhagman.com" }
+]
+
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │ IMPORTANT: This port must match SANDBOX_WORKER_URL in                  │
 # │ ../claude-telegram-bot/.env                                            │
 # └─────────────────────────────────────────────────────────────────────────┘
 [dev]
 port = 8787
+
+# Environment variables
+# Set DEBUG=true to enable verbose debug logging (visible in wrangler tail)
+[vars]
+DEBUG = "false"
 
 # Durable Object bindings
 [durable_objects]
@@ -47,6 +64,12 @@ bucket_name = "andee-sessions"
 [[r2_buckets]]
 binding = "SNAPSHOTS"
 bucket_name = "andee-snapshots"
+
+# R2 binding for persistent media storage (photos, voice, documents)
+# Mounted at /media in containers via sandbox.mountBucket()
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "andee-media"
 
 # Import .script.js files as raw text (for container scripts)
 # These scripts run inside Docker containers, not in the Worker runtime

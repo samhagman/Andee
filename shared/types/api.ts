@@ -19,6 +19,17 @@ export interface ImageData {
   height?: number; // Original image height in pixels
 }
 
+/**
+ * Document data for document messages (PDF, DOC, etc.).
+ */
+export interface DocumentData {
+  base64: string; // Base64-encoded document data
+  mimeType: string; // MIME type from Telegram
+  fileName: string; // Original filename
+  fileId: string; // Telegram file_id for reference
+  fileSize?: number; // File size in bytes
+}
+
 export interface AskTelegramRequest {
   chatId: string;
   message?: string; // Text message or caption (optional if audio/images provided)
@@ -33,6 +44,8 @@ export interface AskTelegramRequest {
   // Image message support
   images?: ImageData[]; // Array of images (single photo or album)
   mediaGroupId?: string; // Telegram media group ID for albums
+  // Document message support
+  document?: DocumentData; // Document (PDF, DOC, etc.)
 }
 
 export interface ResetRequest {

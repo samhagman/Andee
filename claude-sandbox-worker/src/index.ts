@@ -35,6 +35,7 @@ export { SchedulerDO } from "./scheduler/SchedulerDO";
 import { proxyToSandbox, getSandbox } from "@cloudflare/sandbox";
 
 import { CORS_HEADERS, Env, HandlerContext } from "./types";
+import { debug } from "./lib/debug";
 import {
   handleHealth,
   handleAsk,
@@ -99,6 +100,9 @@ async function handleScheduled(
  */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Initialize debug mode from environment
+    debug.init(env);
+
     // Handle preview URL routing for sandbox port exposure (ttyd terminal, etc.)
     // This must come first to route requests to exposed sandbox ports
     const proxyResponse = await proxyToSandbox(request, env);
@@ -184,6 +188,11 @@ export default {
 
       case "/restore":
         if (request.method === "POST") {
+          // #region agent log
+          const sessionId = 'debug-session';
+          const runId = 'restore-run';
+          fetch('http://127.0.0.1:7243/ingest/8f468997-7817-4dbd-8ee7-1182e5e7b898',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'index.ts:185',message:'Router: /restore endpoint called',data:{method:request.method,url:ctx.request.url},timestamp:Date.now(),sessionId,runId,hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
           return handleSnapshotRestore(ctx);
         }
         break;
@@ -258,6 +267,34 @@ export default {
         // Test wsConnect with a simple Python echo server in container
         return handleWsContainerTest(ctx);
 
+      case "/debug-ports":
+        // Debug endpoint to test getExposedPorts
+        if (request.method === "GET") {
+          const debugSandboxId = ctx.url.searchParams.get("sandbox");
+          if (!debugSandboxId) {
+            return Response.json({ error: "Missing sandbox" }, { status: 400, headers: CORS_HEADERS });
+          }
+          try {
+            // Step by step to find where startsWith error occurs
+            console.log("[DEBUG] Step 1: Creating sandbox");
+            const sandbox = getSandbox(env.Sandbox, debugSandboxId, { sleepAfter: "1h" });
+            console.log("[DEBUG] Step 2: Calling getExposedPorts");
+            const result = await sandbox.getExposedPorts();
+            console.log("[DEBUG] Step 3: Got result:", JSON.stringify(result));
+            const ports = result?.ports || [];
+            console.log("[DEBUG] Step 4: Ports length:", ports.length);
+            return Response.json({ 
+              step: "completed",
+              portsCount: ports.length,
+              rawResult: result,
+            }, { headers: CORS_HEADERS });
+          } catch (error) {
+            console.log("[DEBUG] Error:", error);
+            return Response.json({ error: String(error), stack: (error as Error)?.stack }, { status: 500, headers: CORS_HEADERS });
+          }
+        }
+        break;
+
       case "/ws-test":
         // Simple WebSocket echo test to verify WebSocket works at Worker level
         if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -275,6 +312,7 @@ export default {
         });
         console.log("[WS-TEST] WebSocket connection accepted");
         return new Response(null, { status: 101, webSocket: client });
+
     }
 
     return new Response("Not found", { status: 404, headers: CORS_HEADERS });

@@ -85,8 +85,16 @@ async function ensureSnapshotCached(
   }
 
   // Convert to base64 for writing to container
+  // Use chunked approach to avoid stack overflow with large files
   const arrayBuffer = await object.arrayBuffer();
-  const base64Data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+  const bytes = new Uint8Array(arrayBuffer);
+  const CHUNK_SIZE = 32768; // 32KB chunks
+  let binaryString = '';
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+    binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  const base64Data = btoa(binaryString);
 
   // Write to container
   await sandbox.writeFile(cacheFile, base64Data, { encoding: "base64" });

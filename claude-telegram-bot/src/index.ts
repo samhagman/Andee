@@ -5,7 +5,7 @@ import {
   createDefaultSession,
   getSessionKey,
 } from "../../shared/types/session";
-import { ImageData } from "../../shared/types/api";
+import { ImageData, DocumentData } from "../../shared/types/api";
 import { TEST_USER_1, TEST_USER_2, TEST_GROUP_CHAT } from "../../shared/constants/testing";
 
 // Type definitions
@@ -396,6 +396,40 @@ async function fireAndForgetPhotosToSandbox(
         message: caption,
         images,
         mediaGroupId,
+        claudeSessionId,
+        botToken: env.BOT_TOKEN,
+        userMessageId,
+        senderId,
+        isGroup,
+      }),
+    })
+  );
+}
+
+/**
+ * Fire-and-forget: Send document to sandbox worker for processing.
+ */
+async function fireAndForgetDocumentToSandbox(
+  env: Env,
+  chatId: string,
+  document: DocumentData,
+  caption: string | undefined,
+  claudeSessionId: string | null,
+  userMessageId: number,
+  senderId: string,
+  isGroup: boolean
+): Promise<void> {
+  await env.SANDBOX_WORKER.fetch(
+    new Request("https://internal/ask", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || "",
+      },
+      body: JSON.stringify({
+        chatId,
+        message: caption,
+        document,
         claudeSessionId,
         botToken: env.BOT_TOKEN,
         userMessageId,
@@ -1129,6 +1163,128 @@ export default {
             body: JSON.stringify({
               chat_id: chatId,
               text: `Error processing photo: ${err.message || "Unknown error"}`,
+            }),
+          });
+        })
+      );
+
+      // Return immediately - don't block the webhook
+    });
+
+    // Handle document messages - download and forward to worker
+    bot.on("message:document", async (botCtx) => {
+      const chatId = botCtx.chat.id;
+      const senderIdNum = botCtx.from?.id;
+      const senderId = senderIdNum?.toString() || chatId.toString();
+      const isGroup = isGroupChat(botCtx.chat.type);
+      const userMessageId = botCtx.message.message_id;
+      const doc = botCtx.message.document;
+      const caption = botCtx.message.caption;
+
+      // Log user info
+      console.log(
+        `[AUTH] User ${botCtx.from?.username || "unknown"} (ID: ${senderId}) ` +
+        `sent document "${doc.file_name}" (${doc.mime_type}) in chat ${chatId}`
+      );
+
+      // Auth check
+      if (!isUserAllowed(senderIdNum)) {
+        console.log(`[AUTH] Rejected document from user ${senderId}`);
+        await botCtx.reply(
+          "I'm currently in private testing mode and not available for public use."
+        );
+        return;
+      }
+
+      console.log(
+        `[${chatId}] [DOC] Received document: ${doc.file_name}, ` +
+        `mime=${doc.mime_type}, size=${doc.file_size || "?"} bytes`
+      );
+
+      // React with eyes to show we're processing
+      try {
+        await botCtx.api.setMessageReaction(chatId, userMessageId, [
+          { type: "emoji", emoji: "👀" },
+        ]);
+      } catch (err) {
+        console.error(`[${chatId}] Failed to set reaction:`, err);
+      }
+
+      // Download the document file
+      console.log(`[${chatId}] [DOC] Downloading document from Telegram...`);
+      const downloadStart = Date.now();
+      const { data, error: downloadError } = await downloadTelegramFile(
+        env.BOT_TOKEN,
+        doc.file_id
+      );
+
+      if (downloadError || data.byteLength === 0) {
+        console.error(`[${chatId}] [DOC] Download failed after ${Date.now() - downloadStart}ms: ${downloadError}`);
+        await botCtx.reply(
+          "Sorry, I couldn't download that document. Please try again."
+        );
+        return;
+      }
+
+      console.log(`[${chatId}] [DOC] Download complete in ${Date.now() - downloadStart}ms: ${data.byteLength} bytes`);
+
+      // Convert to base64
+      const bytes = new Uint8Array(data);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const docBase64 = btoa(binary);
+
+      console.log(
+        `[${chatId}] [DOC] Encoded to base64: ${docBase64.length} chars (~${Math.round(docBase64.length * 0.75 / 1024)} KB)`
+      );
+
+      // Build DocumentData object
+      const documentData: DocumentData = {
+        base64: docBase64,
+        mimeType: doc.mime_type || "application/octet-stream",
+        fileName: doc.file_name || "document",
+        fileId: doc.file_id,
+        fileSize: doc.file_size,
+      };
+
+      // Get current session
+      const session = await getSession(env, chatId.toString(), senderId, isGroup);
+
+      console.log(
+        `[${chatId}] [DOC] Forwarding "${doc.file_name}" to sandbox-worker (session: ${session.claudeSessionId || "new"})`
+      );
+
+      // Fire and forget - sandbox will handle processing and response
+      ctx.waitUntil(
+        fireAndForgetDocumentToSandbox(
+          env,
+          chatId.toString(),
+          documentData,
+          caption,
+          session.claudeSessionId,
+          userMessageId,
+          senderId,
+          isGroup
+        ).catch((err) => {
+          console.error(`[${chatId}] Error processing document:`, err);
+
+          // Skip error message for test users
+          if (isTestChat(chatId)) {
+            console.log(
+              `[TEST] Would have sent document error to ${chatId}: ${err.message || "Unknown error"}`
+            );
+            return;
+          }
+
+          // Try to send error message to real users
+          return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `Error processing document: ${err.message || "Unknown error"}`,
             }),
           });
         })

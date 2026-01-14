@@ -2,7 +2,7 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createServer } from "http";
-import { appendFileSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import { appendFileSync, writeFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
 import { execSync } from "child_process";
 
 const PORT = 8080;
@@ -163,6 +163,31 @@ let lastKnownApiKey = null;
 const AUTO_SNAPSHOT_AFTER_MS = 55 * 60 * 1000; // 55 minutes
 const SNAPSHOT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 
+// R2 mount detection for memvid storage
+// In production, /media is mounted via R2; in local dev, it falls back to /tmp/media
+const isR2Mounted = () => {
+  try {
+    // /media exists but is empty when not mounted
+    // Check if there's content OR if we've already created the .memvid dir
+    const files = readdirSync('/media');
+    return files.length > 0 || existsSync('/media/.memvid');
+  } catch {
+    return false;
+  }
+};
+
+// Get base path for media storage (R2 or local fallback)
+const getMediaBase = () => isR2Mounted() ? '/media' : '/tmp/media';
+
+// Get memory file path for a chat (now uses chatId, stored in R2)
+const getMemoryFilePath = (chatId) => {
+  const base = getMediaBase();
+  return `${base}/conversation-history/${chatId}/memory.mv2`;
+};
+
+// Get memvid models directory (shared across all chats in R2)
+const getModelsDir = () => `${getMediaBase()}/.memvid/models`;
+
 // Timestamped logging
 function log(msg) {
   const ts = new Date().toISOString();
@@ -173,27 +198,42 @@ function log(msg) {
 
 // Append conversation turn to Memvid memory
 // See: https://docs.memvid.com/ for CLI reference
-// Note: memvid CLI requires content via --contextual <FILE>, not inline text
+// Note: memvid CLI requires content via --input <FILE>, not inline text
+// Storage: /media/conversation-history/{chatId}/memory.mv2 (R2 mount)
+// Models: /media/.memvid/models/ (shared across all chats)
 function appendToMemvid(ctx, userMessage, assistantResponse) {
   try {
-    // Determine memory file location
-    const memoryFile = ctx.isGroup
-      ? '/home/claude/shared/shared.mv2'
-      : `/home/claude/private/${ctx.senderId}/memory.mv2`;
+    // Determine memory file location (now uses chatId, stored in R2)
+    const memoryFile = getMemoryFilePath(ctx.chatId);
+    const memoryDir = memoryFile.replace(/\/[^/]+$/, ''); // Parent directory
+    const modelsDir = getModelsDir();
+    const mediaBase = getMediaBase();
 
-    // Ensure private directory exists if needed
-    if (!ctx.isGroup) {
-      const privateDir = `/home/claude/private/${ctx.senderId}`;
-      if (!existsSync(privateDir)) {
-        mkdirSync(privateDir, { recursive: true });
-        log(`MEMVID created private dir: ${privateDir}`);
-      }
+    log(`MEMVID using path: ${memoryFile} (base: ${mediaBase})`);
+
+    // Ensure conversation-history directory exists
+    if (!existsSync(memoryDir)) {
+      mkdirSync(memoryDir, { recursive: true });
+      log(`MEMVID created dir: ${memoryDir}`);
     }
 
+    // Ensure models directory exists (shared across all chats)
+    if (!existsSync(modelsDir)) {
+      mkdirSync(modelsDir, { recursive: true });
+      log(`MEMVID created models dir: ${modelsDir}`);
+    }
+
+    // Environment with MEMVID_MODELS_DIR for shared embedding models
+    const memvidEnv = { ...process.env, MEMVID_MODELS_DIR: modelsDir };
+
     // Create memory file if it doesn't exist
+    // First-time creation may download models (~133MB), so use longer timeout
     if (!existsSync(memoryFile)) {
       try {
-        execSync(`memvid create "${memoryFile}"`, { timeout: 5000 });
+        execSync(`memvid create "${memoryFile}"`, {
+          timeout: 60000, // 60s for first-time model download
+          env: memvidEnv
+        });
         log(`MEMVID created new memory file: ${memoryFile}`);
       } catch (e) {
         log(`MEMVID create failed: ${e.message}`);
@@ -213,7 +253,10 @@ function appendToMemvid(ctx, userMessage, assistantResponse) {
     const userTempFile = `${tempDir}/user_${Date.now()}.txt`;
     try {
       writeFileSync(userTempFile, userMessage);
-      execSync(`memvid put "${memoryFile}" --input "${userTempFile}" --title "user @ ${timestamp}" --label "conversation"`, { timeout: 5000 });
+      execSync(`memvid put "${memoryFile}" --input "${userTempFile}" --title "user @ ${timestamp}" --label "conversation"`, {
+        timeout: 30000,
+        env: memvidEnv
+      });
       log("MEMVID appended user turn");
     } catch (e) {
       log(`MEMVID user append failed: ${e.message}`);
@@ -226,7 +269,10 @@ function appendToMemvid(ctx, userMessage, assistantResponse) {
     const assistantTempFile = `${tempDir}/assistant_${Date.now()}.txt`;
     try {
       writeFileSync(assistantTempFile, assistantResponse);
-      execSync(`memvid put "${memoryFile}" --input "${assistantTempFile}" --title "assistant @ ${timestamp}" --label "conversation"`, { timeout: 5000 });
+      execSync(`memvid put "${memoryFile}" --input "${assistantTempFile}" --title "assistant @ ${timestamp}" --label "conversation"`, {
+        timeout: 30000,
+        env: memvidEnv
+      });
       log("MEMVID appended assistant turn");
     } catch (e) {
       log(`MEMVID assistant append failed: ${e.message}`);
@@ -349,8 +395,9 @@ async function createAutoSnapshot() {
       return false;
     }
 
-    // Create tar archive
-    execSync(`tar -czf ${snapshotPath} ${dirsToBackup.join(" ")} 2>/dev/null || true`);
+    // Create tar archive (includes everything - streaming handles large files)
+    // Exclude /media which is R2-mounted and persisted separately
+    execSync(`tar -czf ${snapshotPath} --exclude='/media' --exclude='/media/*' ${dirsToBackup.join(" ")} 2>/dev/null || true`);
 
     // Read the tar file
     const { readFileSync } = await import("fs");
@@ -467,18 +514,38 @@ async function updateR2Session(currentSessionId, msg) {
   }
 }
 
+// Build media context prefix for saved media paths
+// This tells Claude where media was saved for artifact integration
+function buildMediaContext(msg) {
+  if (!msg.mediaPaths || msg.mediaPaths.length === 0) {
+    return "";
+  }
+
+  const lines = ["[Media saved to persistent storage:"];
+  for (const media of msg.mediaPaths) {
+    const typeLabel = media.type === "photo" ? "📷" : media.type === "voice" ? "🎤" : "📄";
+    const nameInfo = media.originalName ? ` (${media.originalName})` : "";
+    lines.push(`  ${typeLabel} ${media.path}${nameInfo}`);
+  }
+  lines.push("Include these paths in artifact frontmatter (media_paths) and inline markdown when relevant.]");
+  lines.push("");
+  return lines.join("\n");
+}
+
 // Build content for Claude from message
 // If images present, use content array format for multimodal
 // Otherwise, use simple string for backward compatibility
 function buildContent(msg) {
   const hasImages = msg.images && msg.images.length > 0;
+  const mediaContext = buildMediaContext(msg);
 
   if (hasImages) {
     const content = [];
 
-    // Add text first if present
-    if (msg.text) {
-      content.push({ type: "text", text: msg.text });
+    // Add media context + text first if present
+    const textContent = mediaContext + (msg.text || "");
+    if (textContent) {
+      content.push({ type: "text", text: textContent });
     }
 
     // Add images
@@ -495,8 +562,8 @@ function buildContent(msg) {
 
     return content;
   } else {
-    // Text-only message - use simple string
-    return msg.text;
+    // Text-only message - prepend media context if present
+    return mediaContext + (msg.text || "");
   }
 }
 
@@ -537,14 +604,18 @@ const server = createServer(async (req, res) => {
 
     try {
       const data = JSON.parse(body);
-      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup, apiKey, images, mediaGroupId } = data;
+      const { text, botToken, chatId, userMessageId, workerUrl, claudeSessionId, senderId, isGroup, apiKey, images, mediaGroupId, document, mediaPaths } = data;
 
       const hasImages = images && images.length > 0;
+      const hasDocument = document && document.fileName;
+      const hasMediaPaths = mediaPaths && mediaPaths.length > 0;
       const textPreview = text ? text.substring(0, 30) + "..." : "[no text]";
       const imageInfo = hasImages ? ` +${images.length} image(s)` : "";
       const albumInfo = mediaGroupId ? ` (album: ${mediaGroupId})` : "";
+      const docInfo = hasDocument ? ` +doc:${document.fileName}` : "";
+      const mediaInfo = hasMediaPaths ? ` [${mediaPaths.length} saved]` : "";
 
-      log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${textPreview}${imageInfo}${albumInfo}`);
+      log(`MESSAGE received: chat=${chatId} senderId=${senderId} isGroup=${isGroup} text=${textPreview}${imageInfo}${albumInfo}${docInfo}${mediaInfo}`);
 
       // Track context for auto-snapshot and session updates
       lastKnownWorkerUrl = workerUrl;
@@ -565,7 +636,7 @@ const server = createServer(async (req, res) => {
 
       // Add to queue - the generator will pick it up
       // Note: Album buffering now happens at the telegram-bot level, so images arrive as a single batch
-      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup, apiKey, images });
+      enqueueMessage({ text, botToken, chatId, userMessageId, workerUrl, senderId, isGroup, apiKey, images, document, mediaPaths });
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ queued: true, queueLength: messageQueue.length + 1 }));

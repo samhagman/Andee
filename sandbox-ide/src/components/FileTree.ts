@@ -1,6 +1,7 @@
 // File Tree Component
 
-import { listFiles, listSnapshotFiles } from "../lib/api";
+import { listFiles, listSnapshotFiles, restartSandbox } from "../lib/api";
+import { debug } from "../lib/debug";
 import type { FileEntry, Sandbox } from "../lib/types";
 
 interface TreeNode {
@@ -95,18 +96,82 @@ export class FileTree {
 
   // Load root directory
   async loadDirectory(sandboxId: string, path: string): Promise<void> {
+    debug.fileTree('loadDirectory', { sandboxId, path });
     this.sandboxId = sandboxId;
     this.currentRoot = path;
     this.tree = [];
     this.render();
 
     try {
+      debug.fileTree('fetchDirectory-start', { path });
       const entries = await this.fetchDirectory(path);
+      debug.fileTree('fetchDirectory-complete', {
+        entryCount: entries.length,
+        entries: entries.slice(0, 5).map(e => e.name),
+      });
       this.tree = entries.map((e) => this.entryToNode(e, path));
       this.render();
+      debug.fileTree('render-complete', { treeLength: this.tree.length });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      debug.fileTree('loadDirectory-error', {
+        error: errorMessage,
+        errorType: (error as Error).constructor?.name,
+      });
       console.error("[FileTree] Failed to load directory:", error);
-      this.container.innerHTML = `<div class="loading" style="color: var(--error);">Failed to load files</div>`;
+
+      // Show error with restart button if sandbox might be in a bad state
+      const needsRestart = errorMessage.includes('Unknown Error') ||
+                           errorMessage.includes('500') ||
+                           errorMessage.includes('corrupted');
+
+      this.container.innerHTML = `
+        <div class="loading" style="color: var(--error);">
+          Failed to load files
+          ${needsRestart && this.sandbox ? `
+            <button id="restart-sandbox-btn" style="
+              margin-top: 12px;
+              padding: 8px 16px;
+              background: var(--error);
+              color: white;
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+              display: block;
+            ">🔄 Restart Sandbox</button>
+            <p style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
+              The sandbox may be in a corrupted state.
+            </p>
+          ` : ''}
+        </div>
+      `;
+
+      // Attach restart handler if button exists
+      if (needsRestart && this.sandbox) {
+        const restartBtn = document.getElementById('restart-sandbox-btn');
+        if (restartBtn) {
+          restartBtn.addEventListener('click', async () => {
+            restartBtn.textContent = '⏳ Restarting...';
+            restartBtn.setAttribute('disabled', 'true');
+            try {
+              const result = await restartSandbox(this.sandbox!);
+              if (result.success) {
+                // Reload the file tree
+                await this.loadDirectory(this.sandboxId!, this.currentRoot);
+              } else {
+                this.container.innerHTML = `<div class="loading" style="color: var(--error);">
+                  Restart failed: ${result.error || 'Unknown error'}
+                </div>`;
+              }
+            } catch (restartError) {
+              console.error("[FileTree] Restart failed:", restartError);
+              this.container.innerHTML = `<div class="loading" style="color: var(--error);">
+                Restart failed: ${restartError instanceof Error ? restartError.message : 'Unknown error'}
+              </div>`;
+            }
+          });
+        }
+      }
     }
   }
 
@@ -150,7 +215,12 @@ export class FileTree {
     }
 
     // Live filesystem
+    debug.fileTree('listFiles-start', { sandboxId: this.sandboxId, path });
     const response = await listFiles(this.sandboxId, path);
+    debug.fileTree('listFiles-complete', {
+      entryCount: response.entries.length,
+      entries: response.entries.slice(0, 5).map(e => e.name),
+    });
     // Sort: directories first, then alphabetically
     return response.entries.sort((a, b) => {
       if (a.type !== b.type) {

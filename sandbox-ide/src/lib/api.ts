@@ -194,3 +194,17 @@ export async function restoreSnapshot(
     body: JSON.stringify(request),
   });
 }
+
+// Restart a sandbox (when it's in a corrupted state)
+export async function restartSandbox(
+  sandbox: Sandbox
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  return fetchApi<{ success: boolean; message?: string; error?: string }>("/restart", {
+    method: "POST",
+    body: JSON.stringify({
+      chatId: sandbox.chatId,
+      senderId: sandbox.senderId,
+      isGroup: sandbox.isGroup,
+    }),
+  });
+}

@@ -46,8 +46,15 @@ export interface Env {
   OPENROUTER_MODEL?: string; // e.g., "z-ai/glm-4.7"
   SESSIONS: R2Bucket;
   SNAPSHOTS: R2Bucket;
+  MEDIA: R2Bucket; // Persistent media storage (photos, voice, documents)
   ANDEE_API_KEY?: string;
   AI: Ai; // Workers AI for speech-to-text
+  // Debug mode - set to "true" to enable verbose logging
+  DEBUG?: string;
+  // R2 mounting credentials (for sandbox.mountBucket)
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 }
 
 /**

@@ -16,36 +16,35 @@ Use this skill when the user asks about past conversations or needs context from
 
 ## Memory File Locations
 
+Memory is stored in R2 (mounted at `/media`) by chat ID:
+
 ```
-/home/claude/shared/shared.mv2           # Group chats and shared conversations
-/home/claude/private/{senderId}/memory.mv2  # Private conversations (per user)
+/media/conversation-history/{chatId}/memory.mv2   # All chats (private and group)
 ```
+
+Note: For private chats, chatId equals the user's Telegram ID.
+For group chats, chatId is the group's negative ID (e.g., `-1003285272358`).
 
 ## Getting Context
 
-The sender ID and chat type are available in the context file. Read them with:
+The chat ID is available in the context file. Read it with:
 
 ```bash
-SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
-IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+CHAT_ID=$(jq -r .chatId /tmp/protected/telegram_context/context.json)
 ```
 
-**Always read context first** before searching private memory.
+**Always read context first** before searching memory.
 
 ## Memvid CLI Commands
 
 ### Search Conversation Memory
 
 ```bash
-# First, get context
-SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
-IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+# First, get the chat ID from context
+CHAT_ID=$(jq -r .chatId /tmp/protected/telegram_context/context.json)
 
-# Search shared memory (for group chats or general recall)
-memvid find /home/claude/shared/shared.mv2 --query "pasta recipe" --mode hybrid
-
-# Search user's private memory
-memvid find /home/claude/private/$SENDER_ID/memory.mv2 --query "secret recipe" --mode hybrid
+# Search this chat's memory
+memvid find /media/conversation-history/$CHAT_ID/memory.mv2 --query "pasta recipe" --mode hybrid
 ```
 
 ### Search Modes
@@ -66,12 +65,9 @@ memvid find <memory_file.mv2> --query "<search_query>" [--mode lex|sem|hybrid]
 
 1. **Read context first**:
    ```bash
-   SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
-   IS_GROUP=$(jq -r .isGroup /tmp/protected/telegram_context/context.json)
+   CHAT_ID=$(jq -r .chatId /tmp/protected/telegram_context/context.json)
    ```
-2. **Choose memory file**:
-   - Group chat (`IS_GROUP=true`) → `/home/claude/shared/shared.mv2`
-   - Private chat → `/home/claude/private/$SENDER_ID/memory.mv2`
+2. **Build memory file path**: `/media/conversation-history/$CHAT_ID/memory.mv2`
 3. **Start with hybrid mode** for best recall
 4. **If no results**, try:
    - Different keywords
@@ -81,17 +77,17 @@ memvid find <memory_file.mv2> --query "<search_query>" [--mode lex|sem|hybrid]
 ## Example Usage
 
 ```bash
-# First, always get context
-SENDER_ID=$(jq -r .senderId /tmp/protected/telegram_context/context.json)
+# First, always get chat ID from context
+CHAT_ID=$(jq -r .chatId /tmp/protected/telegram_context/context.json)
 
 # User asks: "What was that Italian recipe we discussed?"
-memvid find /home/claude/shared/shared.mv2 --query "Italian recipe" --mode hybrid
+memvid find /media/conversation-history/$CHAT_ID/memory.mv2 --query "Italian recipe" --mode hybrid
 
 # User asks: "Remember my secret family recipe?"
-memvid find /home/claude/private/$SENDER_ID/memory.mv2 --query "secret family recipe" --mode hybrid
+memvid find /media/conversation-history/$CHAT_ID/memory.mv2 --query "secret family recipe" --mode hybrid
 
 # User asks: "Find conversations about the budget"
-memvid find /home/claude/shared/shared.mv2 --query "budget" --mode lex
+memvid find /media/conversation-history/$CHAT_ID/memory.mv2 --query "budget" --mode lex
 ```
 
 ## Output Interpretation
@@ -110,5 +106,5 @@ Look for:
 ## Limitations
 
 - Memory files don't exist until first append (check if file exists first)
-- Private memory only contains user's private conversations
-- Shared memory contains all group/shared conversations
+- Each chat has its own isolated memory file
+- Memory is stored in R2 (mounted at `/media`) and persists across container restarts
