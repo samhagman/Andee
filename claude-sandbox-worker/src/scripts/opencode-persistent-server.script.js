@@ -26,6 +26,62 @@ const HTTP_PORT = 8080;
 const OPENCODE_PORT = 4096;
 const LOG_FILE = "/workspace/telegram_agent.log";
 const PERSONALITY_PATH = "/home/claude/CLAUDE.md";
+const OPENCODE_CONFIG_PATH = "/home/claude/opencode.json";
+
+/**
+ * Generate OpenCode config with actual environment variable values.
+ *
+ * The static opencode.json uses {env:VAR_NAME} template syntax, but OpenCode's
+ * MCP spawning doesn't resolve these templates for the `environment` field.
+ * This function writes the config with actual values at runtime.
+ */
+function generateOpencodeConfig() {
+  const config = {
+    "$schema": "https://opencode.ai/config.json",
+    "permission": {
+      "*": "allow"
+    },
+    "mcp": {
+      "perplexity": {
+        "type": "local",
+        "command": ["npx", "-y", "server-perplexity-ask"],
+        "enabled": true,
+        "environment": {
+          // Substitute actual env value - OpenCode doesn't resolve {env:...} for MCP environment
+          "PERPLEXITY_API_KEY": process.env.PERPLEXITY_API_KEY || ""
+        }
+      }
+    },
+    "provider": {
+      "cerebras": {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Cerebras",
+        "options": {
+          "baseURL": "https://api.cerebras.ai/v1",
+          // Provider apiKey DOES support {env:...} but we'll use actual value for consistency
+          "apiKey": process.env.CEREBRAS_API_KEY || ""
+        },
+        "models": {
+          "zai-glm-4.7": {
+            "name": "GLM-4.7",
+            "limit": {
+              "context": 200000,
+              "output": 65536
+            }
+          }
+        }
+      }
+    },
+    "model": "cerebras/zai-glm-4.7"
+  };
+
+  writeFileSync(OPENCODE_CONFIG_PATH, JSON.stringify(config, null, 2));
+
+  // Log key presence (not values) for debugging
+  const hasPerplexity = !!process.env.PERPLEXITY_API_KEY;
+  const hasCerebras = !!process.env.CEREBRAS_API_KEY;
+  console.error(`[STARTUP] Generated opencode.json (perplexity=${hasPerplexity}, cerebras=${hasCerebras})`);
+}
 
 // Load personality prompt at startup
 let personalityPrompt = "";
@@ -1034,6 +1090,9 @@ async function runMessageLoop() {
 // Main entry point
 async function main() {
   log("STARTUP OpenCode persistent server (SDK with auth.set)");
+
+  // Generate OpenCode config with actual env values (fixes MCP env template issue)
+  generateOpencodeConfig();
 
   // Start HTTP server first
   server.listen(HTTP_PORT, () => {
