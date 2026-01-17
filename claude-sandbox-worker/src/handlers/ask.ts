@@ -148,8 +148,9 @@ Be thorough - another AI will use your description to help the user.`,
         "X-Title": "Andee Media Analysis",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-pro-preview",
+        model: "google/gemini-3-flash-preview",
         max_tokens: 4000,
+        thinking: "high",  // Enable deep reasoning for better media analysis
         messages: [
           {
             role: "user",
