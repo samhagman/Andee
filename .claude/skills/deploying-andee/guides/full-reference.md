@@ -180,9 +180,20 @@ The sandbox worker still uses manual secret setting:
 
 ```bash
 cd /Users/sam/projects/Andee/claude-sandbox-worker
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ANDEE_API_KEY
+npx wrangler secret put ANTHROPIC_API_KEY   # Claude engine
+npx wrangler secret put ANDEE_API_KEY       # All engines
+npx wrangler secret put OPENROUTER_API_KEY  # Goose/OpenCode media analysis
+npx wrangler secret put CEREBRAS_API_KEY    # Goose/OpenCode GLM-4.7
+npx wrangler secret put PERPLEXITY_API_KEY  # OpenCode web search
 ```
+
+| Secret | Purpose | Required For |
+|--------|---------|--------------|
+| `ANTHROPIC_API_KEY` | Claude API for agent processing | Claude engine |
+| `ANDEE_API_KEY` | Authentication between workers | All engines |
+| `OPENROUTER_API_KEY` | Gemini 3 Flash for media analysis | Goose, OpenCode |
+| `CEREBRAS_API_KEY` | GLM-4.7 model inference | Goose, OpenCode |
+| `PERPLEXITY_API_KEY` | Web search via Perplexity MCP | OpenCode |
 
 ### Generate API Key
 

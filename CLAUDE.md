@@ -62,6 +62,33 @@ See `/developing-andee` → DEBUGGING.md for full troubleshooting details.
 
 Both services use port 8787 for local development.
 
+## Engine Selection
+
+The sandbox worker supports three AI engines, configurable via environment variable:
+
+| Engine | `USE_ENGINE` value | Model | Use Case |
+|--------|-------------------|-------|----------|
+| Claude (default) | `claude` or unset | Claude via Agent SDK | Full agentic capabilities |
+| Goose | `goose` | GLM-4.7 via Goose CLI | Fast, cheap inference (~1000 TPS) |
+| OpenCode | `opencode` | GLM-4.7 via OpenCode SDK | Persistent sessions + Perplexity web search |
+
+**Set in wrangler.toml:**
+```toml
+[vars]
+USE_ENGINE = "claude"  # or "goose" or "opencode"
+```
+
+**Engine capabilities:**
+- **Claude**: Full Agent SDK tools, native vision (5MB limit), session resumption
+- **Goose**: Fast GLM-4.7 inference, one-shot execution, no persistent sessions
+- **OpenCode**: GLM-4.7 with persistent sessions, Perplexity MCP for web search, requires `CEREBRAS_API_KEY` + `PERPLEXITY_API_KEY`
+
+**Media handling differs by engine:**
+- **Claude engine**: Uses Claude's native vision (5MB file size limit)
+- **Goose/OpenCode engines**: Use Gemini 3 Flash via OpenRouter for media analysis (requires `OPENROUTER_API_KEY`)
+
+Media context is injected as `<attached_media_context>` blocks containing file paths and AI-generated descriptions.
+
 ## Developer Skills
 
 Use these skills for detailed guidance:

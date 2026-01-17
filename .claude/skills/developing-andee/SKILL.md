@@ -17,7 +17,7 @@ See [IMPLEMENTATION.md](IMPLEMENTATION.md) for:
 - Mini Apps (architecture, creating, deploying)
 - Available container tools (Read, Write, Bash, WebFetch, etc.)
 - File locations inside container
-- Customizing personality (PERSONALITY.md, system prompt composition)
+- Customizing personality (CLAUDE.md, system prompt composition)
 - Development workflow (terminals, local dev)
 - Skill pattern examples
 
@@ -41,6 +41,29 @@ Andee supports voice message input via Telegram. Voice notes are:
 3. Processed by Claude like normal text
 
 See `handlers/ask.ts:transcribeAudio()` for implementation. Log events are prefixed with `[VOICE]`.
+
+### Video & Photo Messages
+
+Andee supports photo and video attachments via Telegram:
+
+**Photos:**
+1. Downloaded and base64-encoded by Grammy bot (`message:photo` handler)
+2. Multi-photo albums buffered with 3-second delay (Telegram sends separately)
+3. Analyzed by Gemini 3 Flash via OpenRouter (with high thinking mode)
+4. Description injected as `<attached_media_context>` block for Claude
+
+**Videos:**
+1. Downloaded with 50MB limit by Grammy bot (`message:video` handler)
+2. Analyzed by Gemini 3 Flash via OpenRouter (with high thinking mode)
+3. Description injected as `<attached_media_context>` block for Claude
+
+**Key implementation details:**
+- `handlers/ask.ts:analyzeMediaWithGemini()` - Unified media analysis via OpenRouter
+- Album buffering: `claude-telegram-bot/src/index.ts:flushChatPhotoBuffer()`
+- Context format: `<attached_media_context>` with file path and detailed description
+- Requires `OPENROUTER_API_KEY` secret in sandbox worker
+
+**Log events:** Prefixed with `[MEDIA]` for media handling, `[IMAGE]` for photo processing.
 
 ### Testing Recurring Schedules
 
