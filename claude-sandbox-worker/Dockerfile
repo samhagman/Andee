@@ -131,10 +131,8 @@ COPY --chown=claude:claude .claude/CLAUDE.md /home/claude/CLAUDE.md
 # mcp.json configures Perplexity for web search
 COPY --chown=claude:claude .goose/ /home/claude/.config/goose/
 
-# Copy OpenCode configuration (Cerebras provider + Perplexity MCP)
-# OpenCode looks for opencode.json in CWD first, then ~/.opencode/
-# Since server runs with cwd=/home/claude, place config at /home/claude/opencode.json
-COPY --chown=claude:claude .opencode/opencode.json /home/claude/opencode.json
+# OpenCode config is generated at runtime by opencode-persistent-server.script.js
+# This allows env vars (CEREBRAS_API_KEY, PERPLEXITY_API_KEY) to be injected properly
 
 # Expose port 8080 for persistent server (3000 is used by Sandbox infrastructure)
 # Expose port 8081 for ttyd web terminal (used by Sandbox IDE)
