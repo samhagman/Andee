@@ -116,6 +116,11 @@ body {
   background: var(--error);
 }
 
+#status .indicator.restoring {
+  background: #569cd6;
+  animation: pulse 1s infinite;
+}
+
 @keyframes pulse {
   0%,
   100% {

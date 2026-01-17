@@ -81,7 +81,7 @@ async function init() {
   // Initialize file tree FIRST (before sandbox selector triggers auto-select)
   const fileTreeContainer = document.getElementById("file-tree");
   if (fileTreeContainer) {
-    fileTree = new FileTree(fileTreeContainer, handleFileSelect);
+    fileTree = new FileTree(fileTreeContainer, handleFileSelect, handleIDERestart);
   }
 
   // Initialize editor
@@ -145,6 +145,24 @@ function handleSandboxChange(sandbox: Sandbox) {
   // Update terminal connection
   if (terminal) {
     terminal.connect(sandbox.id);
+  }
+}
+
+// Handle restart triggered from FileTree
+function handleIDERestart(): void {
+  if (!currentSandbox) return;
+
+  console.log("[IDE] Restart triggered, reconnecting terminal...");
+
+  // Disconnect terminal (clears cached URL)
+  if (terminal) {
+    terminal.disconnect();
+    // Small delay to ensure container is ready, then reconnect
+    setTimeout(() => {
+      if (currentSandbox) {
+        terminal?.connect(currentSandbox.id);
+      }
+    }, 1000);
   }
 }
 
@@ -231,6 +249,11 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
   });
 
   try {
+    // Show restoring status
+    if (statusIndicator) {
+      statusIndicator.setStatus("restoring");
+    }
+
     // Disconnect terminal before restore
     if (terminal) {
       terminal.disconnect();
@@ -283,6 +306,9 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
     } else {
       debug.snapshot('restore-failed', { error: result.error });
       console.error("[IDE] Restore failed:", result.error);
+      if (statusIndicator) {
+        statusIndicator.setStatus("error");
+      }
       await showErrorModal({
         title: "Restore Failed",
         message: "The snapshot could not be restored.",
@@ -294,6 +320,9 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
       error: error instanceof Error ? error.message : String(error),
     });
     console.error("[IDE] Restore error:", error);
+    if (statusIndicator) {
+      statusIndicator.setStatus("error");
+    }
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
     const errorStack = error instanceof Error ? error.stack : undefined;

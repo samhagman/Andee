@@ -515,7 +515,7 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
     
     if (!isListening) {
       console.log(`[IDE] Starting ws-terminal server for sandbox ${sandboxId}`);
-      
+
       // Use ws-terminal.js which is compatible with our frontend's ttyd protocol
       const wsTerminal = await sandbox.startProcess(
         "node /home/claude/.claude/scripts/ws-terminal.js",
@@ -525,11 +525,14 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
             TERM: "xterm-256color",
             PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             NODE_PATH: "/usr/local/lib/node_modules",
+            // API keys for AI engines (Claude, OpenCode/Cerebras) and MCP servers (Perplexity)
             ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY || "",
+            CEREBRAS_API_KEY: ctx.env.CEREBRAS_API_KEY || "",
+            PERPLEXITY_API_KEY: ctx.env.PERPLEXITY_API_KEY || "",
           },
         }
       );
-      
+
       await wsTerminal.waitForPort(8081, { mode: "tcp", timeout: 15000 });
       console.log(`[IDE] ws-terminal ready on port 8081`);
     }
@@ -624,7 +627,10 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
             TERM: "xterm-256color",
             PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             NODE_PATH: "/usr/local/lib/node_modules",
+            // API keys for AI engines (Claude, OpenCode/Cerebras) and MCP servers (Perplexity)
             ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY || "",
+            CEREBRAS_API_KEY: ctx.env.CEREBRAS_API_KEY || "",
+            PERPLEXITY_API_KEY: ctx.env.PERPLEXITY_API_KEY || "",
           },
         }
       );

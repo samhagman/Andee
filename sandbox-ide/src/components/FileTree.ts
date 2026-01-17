@@ -21,8 +21,10 @@ export class FileTree {
   private sandbox: Sandbox | null = null;
   private tree: TreeNode[] = [];
   private onFileSelect: (path: string) => void;
+  private onRestart?: () => void;
   private selectedPath: string | null = null;
   private currentRoot: string = "/";
+  private isRestarting = false;
 
   // Preview mode state
   private previewMode = false;
@@ -36,9 +38,14 @@ export class FileTree {
     { label: "lists", path: "/home/claude/shared/lists", title: "Shared Lists" },
   ];
 
-  constructor(container: HTMLElement, onFileSelect: (path: string) => void) {
+  constructor(
+    container: HTMLElement,
+    onFileSelect: (path: string) => void,
+    onRestart?: () => void
+  ) {
     this.container = container;
     this.onFileSelect = onFileSelect;
+    this.onRestart = onRestart;
     this.render();
   }
 
@@ -307,6 +314,14 @@ export class FileTree {
     refreshBtn.addEventListener("click", () => this.refresh());
     header.appendChild(refreshBtn);
 
+    const restartBtn = document.createElement("button");
+    restartBtn.className = "nav-btn restart-btn";
+    restartBtn.innerHTML = this.isRestarting ? "⏳ Restarting..." : "⟳ Restart";
+    restartBtn.title = "Restart sandbox";
+    restartBtn.disabled = !this.sandbox || this.isRestarting;
+    restartBtn.addEventListener("click", () => this.handleRestart());
+    header.appendChild(restartBtn);
+
     navBar.appendChild(header);
 
     // Current path display
@@ -435,6 +450,46 @@ export class FileTree {
   async refresh(): Promise<void> {
     if (this.sandboxId) {
       await this.loadDirectory(this.sandboxId, this.currentRoot);
+    }
+  }
+
+  // Restart the sandbox
+  private async handleRestart(): Promise<void> {
+    if (!this.sandbox || this.isRestarting) return;
+
+    this.isRestarting = true;
+    this.renderNavBar();
+
+    try {
+      console.log("[FileTree] Restarting sandbox...");
+      const result = await restartSandbox(this.sandbox);
+      if (result.success) {
+        console.log("[FileTree] Restart successful, notifying and refreshing...");
+        // Notify main.ts to reconnect terminal
+        this.onRestart?.();
+        // Refresh file tree
+        await this.refresh();
+      } else {
+        console.error("[FileTree] Restart failed:", result.error);
+        // Show error in the file tree area briefly
+        const errorDiv = document.createElement("div");
+        errorDiv.className = "loading";
+        errorDiv.style.color = "var(--error)";
+        errorDiv.textContent = `Restart failed: ${result.error || "Unknown error"}`;
+        this.container.appendChild(errorDiv);
+        setTimeout(() => errorDiv.remove(), 3000);
+      }
+    } catch (error) {
+      console.error("[FileTree] Restart error:", error);
+      const errorDiv = document.createElement("div");
+      errorDiv.className = "loading";
+      errorDiv.style.color = "var(--error)";
+      errorDiv.textContent = `Restart failed: ${error instanceof Error ? error.message : "Unknown error"}`;
+      this.container.appendChild(errorDiv);
+      setTimeout(() => errorDiv.remove(), 3000);
+    } finally {
+      this.isRestarting = false;
+      this.renderNavBar();
     }
   }
 

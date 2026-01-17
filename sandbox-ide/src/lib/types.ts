@@ -73,7 +73,8 @@ export type ConnectionStatus =
   | "disconnected"
   | "connecting"
   | "connected"
-  | "error";
+  | "error"
+  | "restoring";
 
 // Snapshot types
 export interface SnapshotInfo {

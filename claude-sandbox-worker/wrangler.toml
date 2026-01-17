@@ -25,9 +25,10 @@ port = 8787
 # Set DEBUG=true to enable verbose debug logging (visible in wrangler tail)
 [vars]
 DEBUG = "false"
-# Set USE_GOOSE=true to use Goose CLI with GLM-4.7 instead of Claude SDK
-# This enables the GLM-4.7 migration path via Cerebras inference
-USE_GOOSE = "false"
+# Engine selection: which AI backend to use for processing messages
+# Options: claude (Anthropic SDK), goose (Goose CLI), opencode (OpenCode SDK)
+# Both Goose and OpenCode use Cerebras GLM-4.7 (cheap + fast)
+USE_ENGINE = "opencode"
 
 # Secrets (set via: npx wrangler secret put <SECRET_NAME>)
 # ANTHROPIC_API_KEY     - Required for Claude SDK path (USE_GOOSE=false)

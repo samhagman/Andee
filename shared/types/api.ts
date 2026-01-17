@@ -30,6 +30,20 @@ export interface DocumentData {
   fileSize?: number; // File size in bytes
 }
 
+/**
+ * Video data for video messages.
+ */
+export interface VideoData {
+  base64: string; // Base64-encoded video data
+  mediaType: string; // MIME type: "video/mp4" | "video/quicktime" | etc
+  fileId: string; // Telegram file_id for reference
+  duration?: number; // Duration in seconds
+  width?: number; // Video width in pixels
+  height?: number; // Video height in pixels
+  fileSize?: number; // File size in bytes
+  fileName?: string; // Optional filename
+}
+
 export interface AskTelegramRequest {
   chatId: string;
   message?: string; // Text message or caption (optional if audio/images provided)
@@ -46,6 +60,8 @@ export interface AskTelegramRequest {
   mediaGroupId?: string; // Telegram media group ID for albums
   // Document message support
   document?: DocumentData; // Document (PDF, DOC, etc.)
+  // Video message support
+  video?: VideoData; // Single video (Telegram sends one at a time)
 }
 
 export interface ResetRequest {

@@ -60,9 +60,9 @@ export interface Env {
   USE_OPENROUTER?: string; // "true" to enable OpenRouter
   OPENROUTER_API_KEY?: string; // OpenRouter API key
   OPENROUTER_MODEL?: string; // e.g., "z-ai/glm-4.7"
-  // Goose CLI toggle for GLM-4.7 migration
-  USE_GOOSE?: string; // "true" to use Goose CLI instead of Claude SDK
-  CEREBRAS_API_KEY?: string; // Cerebras API key for GLM-4.7
+  // Engine selection: claude, goose, or opencode
+  USE_ENGINE?: string; // "claude", "goose", or "opencode"
+  CEREBRAS_API_KEY?: string; // Cerebras API key for GLM-4.7 (goose/opencode)
   PERPLEXITY_API_KEY?: string; // Perplexity API key for web search MCP
   SESSIONS: R2Bucket;
   SNAPSHOTS: R2Bucket;

@@ -6,7 +6,7 @@
  */
 
 import type { Sandbox } from "@cloudflare/sandbox";
-import type { ImageData, DocumentData } from "../../../shared/types/api";
+import type { ImageData, DocumentData, VideoData } from "../../../shared/types/api";
 import type { Env } from "../types";
 
 // Media directory structure: /media/{chatId}/{senderId}/{type}/
@@ -15,8 +15,8 @@ const LOCAL_FALLBACK_PATH = "/tmp/media";
 
 export interface MediaStorageResult {
   path: string; // Full path to stored file
-  type: "photo" | "voice" | "document";
-  originalName?: string; // For documents
+  type: "photo" | "voice" | "document" | "video";
+  originalName?: string; // For documents and videos
 }
 
 /**
@@ -35,7 +35,7 @@ function generateMediaFilename(extension: string): string {
 function getMediaPath(
   chatId: string,
   senderId: string,
-  mediaType: "photos" | "voice" | "documents",
+  mediaType: "photos" | "voice" | "documents" | "videos",
   filename: string,
   isLocalDev: boolean
 ): string {
@@ -182,6 +182,40 @@ export async function saveDocument(
 }
 
 /**
+ * Save a video to media storage.
+ */
+export async function saveVideo(
+  sandbox: Sandbox,
+  video: VideoData,
+  chatId: string,
+  senderId: string,
+  isLocalDev: boolean
+): Promise<MediaStorageResult> {
+  // Extract extension from media type
+  const extMap: Record<string, string> = {
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/x-msvideo": "avi",
+    "video/webm": "webm",
+    "video/x-matroska": "mkv",
+    "video/3gpp": "3gp",
+    "video/x-m4v": "m4v",
+  };
+  const ext = extMap[video.mediaType] || "mp4";
+  const filename = generateMediaFilename(ext);
+  const fullPath = getMediaPath(chatId, senderId, "videos", filename, isLocalDev);
+
+  const dirPath = fullPath.substring(0, fullPath.lastIndexOf("/"));
+  await ensureMediaDir(sandbox, dirPath);
+
+  await sandbox.writeFile(fullPath, video.base64, { encoding: "base64" });
+  const sizeInfo = video.fileSize ? ` (${Math.round(video.fileSize / 1024 / 1024)}MB)` : "";
+  console.log(`[Media] Saved video${sizeInfo}: ${fullPath}`);
+
+  return { path: fullPath, type: "video", originalName: video.fileName };
+}
+
+/**
  * Save all media from a request.
  * Returns array of stored paths.
  */
@@ -194,6 +228,7 @@ export async function saveAllMedia(
     images?: ImageData[];
     audioBase64?: string;
     document?: DocumentData;
+    video?: VideoData;
   }
 ): Promise<MediaStorageResult[]> {
   const results: MediaStorageResult[] = [];
@@ -228,6 +263,16 @@ export async function saveAllMedia(
       results.push(result);
     } catch (err) {
       console.error(`[Media] Failed to save document:`, err);
+    }
+  }
+
+  // Save video
+  if (options.video) {
+    try {
+      const result = await saveVideo(sandbox, options.video, chatId, senderId, isLocalDev);
+      results.push(result);
+    } catch (err) {
+      console.error(`[Media] Failed to save video:`, err);
     }
   }
 

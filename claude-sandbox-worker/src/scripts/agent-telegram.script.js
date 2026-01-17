@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 const input = JSON.parse(readFileSync("/workspace/input.json", "utf-8"));
 const { message, claudeSessionId, botToken, chatId, userMessageId, workerUrl, senderId, isGroup } = input;
 
-const PERSONALITY_PATH = "/home/claude/.claude/PERSONALITY.md";
+const PERSONALITY_PATH = "/home/claude/CLAUDE.md";
 
 // Load personality prompt at startup (appended to system prompt)
 let personalityPrompt = "";

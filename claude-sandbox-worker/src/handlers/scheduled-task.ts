@@ -86,10 +86,18 @@ async function restoreFromSnapshot(
       return false;
     }
 
+    // Convert to base64 using chunked approach to avoid stack overflow on large snapshots
+    // The spread operator (...new Uint8Array(arrayBuffer)) causes "Maximum call stack size exceeded"
+    // on files larger than ~500KB-1MB due to JavaScript's argument limit (~65K-130K)
     const arrayBuffer = await object.arrayBuffer();
-    const base64Data = btoa(
-      String.fromCharCode(...new Uint8Array(arrayBuffer))
-    );
+    const bytes = new Uint8Array(arrayBuffer);
+    const CHUNK_SIZE = 32768; // 32KB chunks
+    let binaryString = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+      binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+    }
+    const base64Data = btoa(binaryString);
 
     await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
       encoding: "base64",

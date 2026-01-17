@@ -2,22 +2,43 @@
 FROM docker.io/cloudflare/sandbox:0.6.7
 
 # Install Claude Code CLI (required runtime for Agent SDK - kept for USE_GOOSE=false fallback)
-RUN npm install -g @anthropic-ai/claude-code
+# PINNED: Prevents breaking changes from auto-updates
+RUN npm install -g @anthropic-ai/claude-code@2.1.9
 
 # Install Agent SDK globally for the agent script (kept for USE_GOOSE=false fallback)
-RUN npm install -g @anthropic-ai/claude-agent-sdk
+# PINNED: Prevents breaking changes from auto-updates
+RUN npm install -g @anthropic-ai/claude-agent-sdk@0.2.9
 
 # Install bzip2 (required to extract Goose CLI tarball)
 RUN apt-get update && apt-get install -y bzip2 && rm -rf /var/lib/apt/lists/*
 
-# Install Goose CLI for GLM-4.7 migration (USE_GOOSE=true path)
+# Install Goose CLI for GLM-4.7 migration (USE_ENGINE=goose path)
 # Downloads and installs the Goose binary from Block's releases
 # CONFIGURE=false skips interactive setup (we configure via env vars)
 RUN curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash && \
     mv /root/.local/bin/goose /usr/local/bin/goose && \
     goose --version
 
-# Install Perplexity MCP server for web search capability (used by Goose)
+# Install OpenCode CLI for persistent server mode (USE_ENGINE=opencode path)
+# OpenCode provides the server binary and SDK client for Cerebras GLM-4.7
+# Note: Install script puts binary at $HOME/.opencode/bin/opencode
+# PINNED to v1.1.21: Prevents breaking changes from auto-updates
+RUN curl -fsSL https://opencode.ai/install | OPENCODE_VERSION=1.1.21 bash && \
+    mv /root/.opencode/bin/opencode /usr/local/bin/opencode && \
+    opencode --version
+
+# Install OpenCode SDK for Node.js + AI SDK for Cerebras provider
+# PINNED: Prevents breaking changes from auto-updates
+RUN npm install -g @opencode-ai/sdk@1.1.23 @ai-sdk/openai-compatible
+
+# Install Bun runtime for TypeScript skill scripts (analyzing-media, analyze-video)
+# Bun provides fast TypeScript execution without compilation step
+# PINNED to v1.3.5: v1.3.6 has AVX regression causing crash under Rosetta/Docker emulation
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/root/.bun bash -s "bun-v1.3.5" && \
+    mv /root/.bun/bin/bun /usr/local/bin/bun && \
+    bun --version
+
+# Install Perplexity MCP server for web search capability (used by Goose + OpenCode)
 RUN npm install -g server-perplexity-ask
 
 # Install build dependencies for native node modules (node-pty requires compilation)
@@ -57,8 +78,19 @@ RUN ln -s /usr/local/lib/node_modules /workspace/node_modules
 # Create .claude directory for the user
 RUN mkdir -p /home/claude/.claude && chown -R claude:claude /home/claude/.claude
 
-# Create .goose config directory for Goose MCP configuration
-RUN mkdir -p /home/claude/.config/goose && chown -R claude:claude /home/claude/.config/goose
+# Create .config directory and subdirs for Goose and OpenCode
+# IMPORTANT: chown the entire .config dir, not just subdirs (otherwise parent is root-owned)
+RUN mkdir -p /home/claude/.config/goose /home/claude/.config/opencode \
+    && chown -R claude:claude /home/claude/.config
+
+# Create .opencode config directory in home (OpenCode looks for ~/.opencode/opencode.json)
+RUN mkdir -p /home/claude/.opencode && chown -R claude:claude /home/claude/.opencode
+
+# Create OpenCode auth and state directories for credentials and runtime storage
+# Note: auth.json will be created at runtime with CEREBRAS_API_KEY from env
+RUN mkdir -p /home/claude/.local/share/opencode \
+    && mkdir -p /home/claude/.local/state \
+    && chown -R claude:claude /home/claude/.local
 
 # Pre-create memory directory structure (for artifacts and conversation memory)
 RUN mkdir -p /home/claude/shared/lists \
@@ -90,13 +122,19 @@ RUN ln -s /home/claude/.claude/skills/reminders/scripts/set-reminder.sh /usr/loc
 # Copy CLAUDE.md for project-level instructions (Claude Code finds this from cwd)
 COPY --chown=claude:claude CLAUDE.md /workspace/CLAUDE.md
 
-# Copy PERSONALITY.md for personality/style prompt (loaded by agent scripts)
-COPY --chown=claude:claude .claude/PERSONALITY.md /home/claude/.claude/PERSONALITY.md
+# Copy CLAUDE.md for system instructions (loaded by all engines)
+ARG CLAUDE_MD_VERSION=2026-01-15-v3-session-validation
+COPY --chown=claude:claude .claude/CLAUDE.md /home/claude/CLAUDE.md
 
 # Copy Goose configuration (extensions + MCP servers)
 # config.yaml enables developer and skills extensions
 # mcp.json configures Perplexity for web search
 COPY --chown=claude:claude .goose/ /home/claude/.config/goose/
+
+# Copy OpenCode configuration (Cerebras provider + Perplexity MCP)
+# OpenCode looks for opencode.json in CWD first, then ~/.opencode/
+# Since server runs with cwd=/home/claude, place config at /home/claude/opencode.json
+COPY --chown=claude:claude .opencode/opencode.json /home/claude/opencode.json
 
 # Expose port 8080 for persistent server (3000 is used by Sandbox infrastructure)
 # Expose port 8081 for ttyd web terminal (used by Sandbox IDE)

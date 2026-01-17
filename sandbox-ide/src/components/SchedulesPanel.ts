@@ -287,7 +287,6 @@ export class SchedulesPanel {
    */
   private render(): void {
     const disabled = !this.sandbox;
-    const hasSchedules = this.schedules.length > 0;
     const enabledCount = this.schedules.filter((s) => s.enabled).length;
 
     this.container.innerHTML = `

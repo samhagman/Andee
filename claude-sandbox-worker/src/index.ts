@@ -177,6 +177,13 @@ export default {
         }
         break;
 
+      // Force OpenCode SDK path (for A/B testing without changing env vars)
+      case "/ask/opencode":
+        if (request.method === "POST") {
+          return handleAsk(ctx, "opencode");
+        }
+        break;
+
       case "/restart":
         if (request.method === "POST") {
           return handleRestart(ctx);

@@ -687,6 +687,56 @@ wrangler tail claude-sandbox-worker
 
 ---
 
+## Dockerfile / Container Setup Issues
+
+Quick reference for container build and setup issues:
+
+### Bun AVX Crash (Apple Silicon / Docker Desktop)
+
+**Error:**
+```
+CPU lacks AVX support
+Illegal instruction at address 0x4001FB4
+```
+
+**Root Cause:** Docker Desktop on Apple Silicon uses Rosetta 2 for x86_64 emulation. Rosetta does NOT support AVX instructions. Some Bun versions (e.g., 1.3.6) have regressions where their "baseline" build still triggers AVX code paths.
+
+**Solutions:**
+
+1. **Disable Rosetta in Docker Desktop** (recommended):
+   - Docker Desktop → Settings → General
+   - Uncheck "Use Rosetta for x86_64/amd64 emulation on Apple Silicon"
+   - Apply & Restart
+
+2. **Pin Bun to a working version** in Dockerfile:
+   ```dockerfile
+   # PINNED to v1.3.5: v1.3.6 has AVX regression causing crash under Rosetta
+   RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/root/.bun bash -s "bun-v1.3.5" && \
+       mv /root/.bun/bin/bun /usr/local/bin/bun
+   ```
+
+**Why it happens intermittently:** You may see this work in the morning but fail later because Docker pulled a new base image or Bun's install script installed a newer version with the regression.
+
+**References:**
+- [Bun Issue #19309](https://github.com/oven-sh/bun/issues/19309) - AVX crashes in baseline builds
+- [Docker for Mac #7137](https://github.com/docker/for-mac/issues/7137) - Rosetta breaks amd64 images needing AVX
+
+---
+
+| Problem | Error | Solution |
+|---------|-------|----------|
+| Bun AVX crash | `CPU lacks AVX support` / `Illegal instruction` | Disable Rosetta in Docker Desktop OR pin Bun to 1.3.5 (see above) |
+| Claude refuses root | `--dangerously-skip-permissions cannot be used with root/sudo` | Create non-root user in Dockerfile: `RUN useradd -m -s /bin/bash claude` then `USER claude` |
+| ESM can't find global npm packages | `Cannot find package '@anthropic-ai/claude-agent-sdk'` | Symlink in Dockerfile: `RUN ln -s /usr/local/lib/node_modules /workspace/node_modules` |
+| Sandbox SQL not enabled | `SQL is not enabled for this Durable Object class` | Use `new_sqlite_classes` in wrangler.toml migrations |
+| Claude can't find config | Process fails silently | Set `HOME=/home/claude` via `env` option in `startProcess()` |
+| Container killed on deploy | `Runtime signalled the container to exit due to a new version rollout` | Transient - next message will spin up fresh container |
+| Memvid file not found | `memvid find` returns empty | File is created on first `memvid put`. Check if `.mv2` file exists first. |
+| Terminal lines wrong position | Text at random positions | Ensure ws-terminal.js uses `pty.spawn()`, not `child_process.spawn()` |
+| node-pty build fails | `gyp ERR! build error` | Add build-essential + python3 to Dockerfile before `npm install -g node-pty` |
+
+---
+
 ## Performance Timing Analysis
 
 ### Persistent Server Performance

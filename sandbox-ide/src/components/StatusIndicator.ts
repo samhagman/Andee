@@ -24,7 +24,7 @@ export class StatusIndicator {
 
   setStatus(status: ConnectionStatus): void {
     // Remove all status classes
-    this.indicator.classList.remove("connected", "connecting", "error");
+    this.indicator.classList.remove("connected", "connecting", "error", "restoring");
 
     switch (status) {
       case "connected":
@@ -34,6 +34,10 @@ export class StatusIndicator {
       case "connecting":
         this.indicator.classList.add("connecting");
         this.label.textContent = "Connecting...";
+        break;
+      case "restoring":
+        this.indicator.classList.add("restoring");
+        this.label.textContent = "Restoring snapshot...";
         break;
       case "error":
         this.indicator.classList.add("error");

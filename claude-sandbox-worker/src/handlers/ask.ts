@@ -20,13 +20,15 @@ import {
   CURL_TIMEOUT_MS,
   SERVER_STARTUP_TIMEOUT_MS,
   GOOSE_TIMEOUT_MS,
+  OPENCODE_TIMEOUT_MS,
 } from "../../../shared/config";
-import { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT } from "../scripts";
+import { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT, OPENCODE_PERSISTENT_SERVER_SCRIPT } from "../scripts";
 import {
   mountMediaBucket,
   saveAllMedia,
   type MediaStorageResult,
 } from "../lib/media";
+import type { VideoData } from "../../../shared/types/api";
 import {
   buildGooseEnv,
   generateSystemPrompt,
@@ -34,6 +36,166 @@ import {
   sendToTelegram,
   sendErrorToTelegram,
 } from "../lib/goose";
+import { buildOpenCodeEnv } from "../lib/opencode";
+
+/**
+ * Build media context instruction to inject into message.
+ * This tells the engine about attached media and how to analyze it.
+ *
+ * The instruction is prepended to the user's message so the engine sees:
+ * 1. Media context with paths and skill instructions
+ * 2. The user's actual message/request
+ *
+ * This preserves session context (engine sees every message) while enabling
+ * media analysis via skill scripts.
+ */
+function buildMediaContextInstruction(
+  mediaPaths: { path: string; type: string }[],
+  hasVideo: boolean
+): string {
+  if (mediaPaths.length === 0) return "";
+
+  // Filter to only image/photo types or video types
+  const relevantMedia = mediaPaths.filter((m) =>
+    hasVideo ? m.type === "video" : m.type === "photo"
+  );
+
+  if (relevantMedia.length === 0) return "";
+
+  const mediaList = relevantMedia
+    .map((m) => `  - [${m.type}] path=${m.path}`)
+    .join("\n");
+
+  const skillName = hasVideo ? "analyze-video" : "analyzing-media";
+  const scriptName = hasVideo ? "analyze-video.ts" : "analyze-image.ts";
+
+  return `<media-context hidden="true">
+This message includes media that requires analysis to respond properly.
+
+Media attached:
+${mediaList}
+
+To analyze this media, use the ${skillName} skill:
+  bun /home/claude/.claude/skills/${skillName}/scripts/${scriptName} "<path>" "<your question>"
+
+Run the script with an appropriate question based on what the user is asking.
+</media-context>
+
+`;
+}
+
+/**
+ * Analyze media (images or video) using Gemini via OpenRouter.
+ * This pre-processes media for engines that can't handle vision (like OpenCode/GLM).
+ *
+ * Gemini 3 Pro has much better limits than Claude Vision:
+ * - Images consume ~1,120 tokens each (not strict file size limit)
+ * - 1 million token context window
+ * - Native video support
+ *
+ * Returns a text description of the media that can be included in the message.
+ */
+async function analyzeMediaWithGemini(
+  media: Array<{ base64: string; mediaType: string }>,
+  userMessage: string,
+  openrouterApiKey: string
+): Promise<string> {
+  if (!media || media.length === 0) return "";
+
+  try {
+    // Build content array with media and prompt (OpenRouter/OpenAI format)
+    const content: Array<{ type: string; image_url?: { url: string }; text?: string }> = [];
+
+    // Add each media item as data URL
+    for (const item of media) {
+      content.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${item.mediaType};base64,${item.base64}`,
+        },
+      });
+    }
+
+    // Add analysis prompt
+    const mediaType = media[0]?.mediaType?.startsWith("video/") ? "video" : "image";
+    const mediaCount = media.length > 1 ? `these ${media.length} ${mediaType}s` : `this ${mediaType}`;
+
+    content.push({
+      type: "text",
+      text: `The user sent ${mediaCount} with the message: "${userMessage}"
+
+Provide an extremely detailed description of what you see. Include:
+• All text, numbers, ingredients, instructions, or written content (transcribe exactly if visible)
+• Visual elements, layout, colors, and design details
+• Any relevant context or details that would help understand the content
+
+Format your response using Telegram-approved markdown:
+• Use **bold** for emphasis and section headers (NOT # headers)
+• Use • for bullet points (NOT - or *)
+• Keep paragraphs short and scannable
+• No horizontal rules (---) or tables
+
+Be thorough - another AI will use your description to help the user.`,
+    });
+
+    // Call Gemini via OpenRouter
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${openrouterApiKey}`,
+        "HTTP-Referer": "https://andee.bot",
+        "X-Title": "Andee Media Analysis",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-pro-preview",
+        max_tokens: 4000,
+        messages: [
+          {
+            role: "user",
+            content: content,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[Gemini Vision] API error: ${response.status} - ${errorText}`);
+      return `[Media analysis failed: ${response.status}]`;
+    }
+
+    const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const description = result.choices?.[0]?.message?.content || "[No description available]";
+
+    console.log(`[Gemini Vision] Got description (${description.length} chars)`);
+    return description;
+  } catch (error) {
+    console.error(`[Gemini Vision] Error:`, error);
+    return `[Media analysis error: ${error instanceof Error ? error.message : "Unknown error"}]`;
+  }
+}
+
+/**
+ * Build attached media context block for OpenCode.
+ * Includes file paths and Claude's description of the media.
+ */
+function buildAttachedMediaContext(
+  mediaPaths: Array<{ path: string; type: string }>,
+  description: string
+): string {
+  const pathList = mediaPaths.map((m) => `• ${m.type}: ${m.path}`).join("\n");
+
+  return `<attached_media_context>
+**Attached Media:**
+${pathList}
+
+**Content Description:**
+${description}
+</attached_media_context>
+
+`;
+}
 
 // Snapshot configuration
 const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
@@ -108,11 +270,18 @@ async function restoreFromSnapshot(
       return false;
     }
 
-    // Convert to base64 for writeFile
+    // Convert to base64 using chunked approach to avoid stack overflow on large snapshots
+    // The spread operator (...new Uint8Array(arrayBuffer)) causes "Maximum call stack size exceeded"
+    // on files larger than ~500KB-1MB due to JavaScript's argument limit (~65K-130K)
     const arrayBuffer = await object.arrayBuffer();
-    const base64Data = btoa(
-      String.fromCharCode(...new Uint8Array(arrayBuffer))
-    );
+    const bytes = new Uint8Array(arrayBuffer);
+    const CHUNK_SIZE = 32768; // 32KB chunks
+    let binaryString = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+      binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+    }
+    const base64Data = btoa(binaryString);
 
     // Write snapshot to container
     await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
@@ -185,7 +354,7 @@ async function transcribeAudio(
 
 export async function handleAsk(
   ctx: HandlerContext,
-  forceEngine?: "goose" | "claude"
+  forceEngine?: "goose" | "claude" | "opencode"
 ): Promise<Response> {
   try {
     const body = (await ctx.request.json()) as AskTelegramRequest;
@@ -202,6 +371,7 @@ export async function handleAsk(
       images,
       mediaGroupId,
       document,
+      video,
     } = body;
 
     // Validate required fields
@@ -217,10 +387,11 @@ export async function handleAsk(
     const hasAudio = Boolean(audioBase64);
     const hasImages = images && images.length > 0;
     const hasDocument = Boolean(document);
+    const hasVideo = Boolean(video);
 
-    if (!hasText && !hasAudio && !hasImages && !hasDocument) {
+    if (!hasText && !hasAudio && !hasImages && !hasDocument && !hasVideo) {
       return Response.json(
-        { error: "Must provide message, audioBase64, images, or document" },
+        { error: "Must provide message, audioBase64, images, document, or video" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
@@ -237,6 +408,14 @@ export async function handleAsk(
     if (hasAudio && hasImages) {
       return Response.json(
         { error: "Cannot combine audio and images" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Cannot combine audio with video
+    if (hasAudio && hasVideo) {
+      return Response.json(
+        { error: "Cannot combine audio and video" },
         { status: 400, headers: CORS_HEADERS }
       );
     }
@@ -275,10 +454,11 @@ export async function handleAsk(
       );
     }
 
-    const inputType = audioBase64 ? "voice" : hasImages ? "photo" : hasDocument ? "document" : "text";
+    const inputType = audioBase64 ? "voice" : hasVideo ? "video" : hasImages ? "photo" : hasDocument ? "document" : "text";
     const imageInfo = hasImages ? ` (${images!.length} image(s)${mediaGroupId ? `, album: ${mediaGroupId}` : ""})` : "";
     const docInfo = hasDocument ? ` (${document!.fileName})` : "";
-    console.log(`[${chatId}] Processing ${inputType} message${imageInfo}${docInfo} (senderId: ${senderId}, isGroup: ${isGroup})`);
+    const videoInfo = hasVideo ? ` (${video!.duration || "?"}s, ${video!.fileSize ? Math.round(video!.fileSize / 1024 / 1024) + "MB" : "?MB"})` : "";
+    console.log(`[${chatId}] Processing ${inputType} message${imageInfo}${docInfo}${videoInfo} (senderId: ${senderId}, isGroup: ${isGroup})`);
 
     // Get sandbox with configurable sleep timeout
     const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {
@@ -296,14 +476,15 @@ export async function handleAsk(
       isLocalDev = true;
     }
 
-    // Save incoming media to storage (photos, voice, documents)
-    const hasMedia = hasImages || audioBase64 || hasDocument;
+    // Save incoming media to storage (photos, voice, documents, video)
+    const hasMedia = hasImages || audioBase64 || hasDocument || hasVideo;
     if (hasMedia && senderId) {
       try {
         mediaPaths = await saveAllMedia(sandbox, chatId, senderId, isLocalDev, {
           images,
           audioBase64,
           document,
+          video,
         });
         console.log(`[${chatId}] Saved ${mediaPaths.length} media file(s) to ${isLocalDev ? "/tmp/media" : "/media"}`);
       } catch (err) {
@@ -320,15 +501,26 @@ export async function handleAsk(
     }).catch(() => {});
 
     // ===============================================================
-    // GOOSE EXECUTION PATH (USE_GOOSE=true)
+    // ENGINE SELECTION
     // ===============================================================
-    // ENGINE SELECTION: Goose CLI vs Claude SDK
-    // Priority: forceEngine param > USE_GOOSE env var
+    // Priority: forceEngine param > USE_ENGINE env var
+    // Options: claude, goose, opencode
     // ===============================================================
-    const useGoose = forceEngine === "goose" || (forceEngine !== "claude" && ctx.env.USE_GOOSE === "true");
+    const engineSelection = forceEngine || ctx.env.USE_ENGINE;
+    if (!engineSelection) {
+      return Response.json(
+        { error: "USE_ENGINE not set. Options: claude, goose, opencode" },
+        { status: 500, headers: CORS_HEADERS }
+      );
+    }
 
-    if (useGoose) {
-      console.log(`[${chatId}] Using Goose CLI path (GLM-4.7)${forceEngine ? ` [forced: ${forceEngine}]` : ""}`);
+    console.log(`[${chatId}] Engine selection: ${engineSelection}${forceEngine ? ` [forced]` : ""}`);
+
+    // ===============================================================
+    // GOOSE EXECUTION PATH (USE_ENGINE=goose)
+    // ===============================================================
+    if (engineSelection === "goose") {
+      console.log(`[${chatId}] Using Goose CLI path (GLM-4.7)`);
 
       // Restore from snapshot if container is fresh
       const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
@@ -355,7 +547,7 @@ export async function handleAsk(
 
       // Load personality
       const personalityResult = await sandbox.exec(
-        "cat /home/claude/.claude/PERSONALITY.md 2>/dev/null || echo ''",
+        "cat /home/claude/CLAUDE.md 2>/dev/null || echo ''",
         { timeout: QUICK_COMMAND_TIMEOUT_MS }
       );
       const personality = personalityResult.stdout || "";
@@ -426,10 +618,170 @@ export async function handleAsk(
     }
 
     // ===============================================================
-    // CLAUDE SDK EXECUTION PATH (USE_GOOSE=false or unset)
+    // OPENCODE EXECUTION PATH (USE_ENGINE=opencode)
+    // Uses persistent server with OpenCode SDK + Cerebras GLM-4.7
+    // ===============================================================
+    if (engineSelection === "opencode") {
+      console.log(`[${chatId}] Using OpenCode SDK path (GLM-4.7)`);
+
+      // Restore from snapshot if available (fresh container)
+      const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
+      if (restored) {
+        console.log(`[Worker] Filesystem restored from snapshot for chat ${chatId}`);
+      }
+
+      // Read user timezone from preferences
+      let userTimezone = "UTC";
+      if (senderId) {
+        const prefsPath = `/home/claude/private/${senderId}/preferences.yaml`;
+        const prefsResult = await sandbox.exec(
+          `cat ${prefsPath} 2>/dev/null || echo ""`,
+          { timeout: QUICK_COMMAND_TIMEOUT_MS }
+        );
+        if (prefsResult.stdout.includes("timezone:")) {
+          const match = prefsResult.stdout.match(/timezone:\s*([^\n]+)/);
+          if (match) {
+            userTimezone = match[1].trim();
+            console.log(`[Worker] User ${senderId} timezone: ${userTimezone}`);
+          }
+        }
+      }
+
+      // Check if OpenCode persistent server is running
+      const processes = await sandbox.listProcesses();
+      const opencodeProcess = processes.find((p) =>
+        p.command?.includes("opencode_persistent_server.mjs")
+      );
+
+      if (!opencodeProcess) {
+        console.log(`[Worker] Starting OpenCode persistent server for chat ${chatId}`);
+
+        // Write the OpenCode persistent server script
+        await sandbox.writeFile(
+          "/workspace/opencode_persistent_server.mjs",
+          OPENCODE_PERSISTENT_SERVER_SCRIPT
+        );
+
+        // Ensure workspace/files directory exists
+        await sandbox.exec("mkdir -p /workspace/files", {
+          timeout: QUICK_COMMAND_TIMEOUT_MS,
+        });
+
+        // Start the OpenCode persistent server
+        const server = await sandbox.startProcess(
+          "node /workspace/opencode_persistent_server.mjs",
+          {
+            env: buildOpenCodeEnv(ctx.env, userTimezone),
+          }
+        );
+
+        // Wait for server to be ready
+        console.log(`[Worker] Waiting for OpenCode server to be ready...`);
+        await server.waitForPort(PERSISTENT_SERVER_PORT, {
+          path: "/health",
+          timeout: SERVER_STARTUP_TIMEOUT_MS,
+          status: { min: 200, max: 299 },
+        });
+
+        console.log(`[Worker] OpenCode persistent server ready for chat ${chatId}`);
+      } else {
+        console.log(`[Worker] OpenCode persistent server already running for chat ${chatId}`);
+      }
+
+      // Service bindings use "internal" hostname which isn't resolvable from containers
+      const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+      const requestUrl = new URL(ctx.request.url);
+      const workerUrl = requestUrl.host === "internal"
+        ? PRODUCTION_WORKER_URL
+        : `${requestUrl.protocol}//${requestUrl.host}`;
+
+      // For OpenCode (GLM), pre-analyze media with Gemini since GLM can't see images/videos
+      // Gemini provides a detailed description, OpenCode decides what to do using its skills
+      let mediaContextPrefix = "";
+
+      // Analyze images with Gemini
+      if (hasImages && images && images.length > 0 && ctx.env.OPENROUTER_API_KEY) {
+        console.log(`[${chatId}] Analyzing ${images.length} image(s) with Gemini...`);
+        const description = await analyzeMediaWithGemini(
+          images.map((img) => ({ base64: img.base64, mediaType: img.mediaType })),
+          finalMessage || "Describe this image",
+          ctx.env.OPENROUTER_API_KEY
+        );
+        mediaContextPrefix = buildAttachedMediaContext(mediaPaths, description);
+        console.log(`[${chatId}] Media context ready (${description.length} chars)`);
+      }
+
+      // Analyze videos with Gemini (same function handles both)
+      if (hasVideo && video && ctx.env.OPENROUTER_API_KEY && !mediaContextPrefix) {
+        console.log(`[${chatId}] Analyzing video with Gemini...`);
+        const description = await analyzeMediaWithGemini(
+          [{ base64: video.base64, mediaType: video.mediaType }],
+          finalMessage || "Describe this video",
+          ctx.env.OPENROUTER_API_KEY
+        );
+        mediaContextPrefix = buildAttachedMediaContext(mediaPaths, description);
+        console.log(`[${chatId}] Video context ready (${description.length} chars)`);
+      }
+
+      // Prepend media context to user's message
+      const messageWithContext = mediaContextPrefix + (finalMessage || "What's in this?");
+      console.log(`[${chatId}] OPENCODE DEBUG: messageWithContext="${messageWithContext.substring(0, 100)}..."`);
+
+      // POST message to the internal OpenCode server
+      // Note: We DON'T include raw images/video base64 here - Gemini already analyzed them
+      // and the description is in messageWithContext. Only include mediaPaths for reference.
+      const messagePayload = JSON.stringify({
+        text: messageWithContext,
+        botToken,
+        chatId,
+        userMessageId,
+        workerUrl,
+        claudeSessionId,
+        senderId,
+        isGroup,
+        apiKey: ctx.env.ANDEE_API_KEY,
+        mediaGroupId,
+        document, // Documents might still be needed for non-vision processing
+        mediaPaths: mediaPaths.map((m) => ({
+          path: m.path,
+          type: m.type,
+          originalName: m.originalName,
+        })),
+      });
+
+      // Write payload to temp file
+      await sandbox.writeFile("/tmp/message.json", messagePayload);
+
+      const curlResult = await sandbox.exec(
+        `curl -s -X POST http://localhost:${PERSISTENT_SERVER_PORT}/message -H 'Content-Type: application/json' -d @/tmp/message.json`,
+        { timeout: CURL_TIMEOUT_MS }
+      );
+
+      if (curlResult.exitCode !== 0) {
+        console.error(`[Worker] Failed to post message to OpenCode: ${curlResult.stderr}`);
+        return Response.json(
+          { error: curlResult.stderr || "OpenCode message queue failed" },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      } else {
+        console.log(`[Worker] Message queued to OpenCode: ${curlResult.stdout}`);
+      }
+
+      return Response.json({ started: true, chatId, engine: "opencode" }, { headers: CORS_HEADERS });
+    }
+
+    // ===============================================================
+    // CLAUDE SDK EXECUTION PATH (USE_ENGINE=claude)
     // Uses persistent server with Claude Agent SDK
     // ===============================================================
-    console.log(`[${chatId}] Using Claude SDK path (Sonnet 4.5)${forceEngine ? ` [forced: ${forceEngine}]` : ""}`);
+    if (engineSelection !== "claude") {
+      return Response.json(
+        { error: `Unknown engine: ${engineSelection}. Options: claude, goose, opencode` },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    console.log(`[${chatId}] Using Claude SDK path (Sonnet 4.5)`);
 
     // Service bindings use "internal" hostname which isn't resolvable from containers
     // Use production URL when hostname is "internal", otherwise derive from request
@@ -506,10 +858,21 @@ export async function handleAsk(
       );
     }
 
+    // Build media context for VIDEO only (Claude has native vision for images)
+    // Video requires the analyze-video skill since Claude can't process video natively
+    const needsVideoContext = mediaPaths.length > 0 && hasVideo;
+    const mediaContextPrefixClaude = needsVideoContext
+      ? buildMediaContextInstruction(mediaPaths, true)
+      : "";
+
+    // Prepend media context to user's message (only for video)
+    // For images, Claude sees them directly via vision API - no context injection needed
+    const messageWithContextClaude = mediaContextPrefixClaude + (finalMessage || (hasImages ? "What's in this image?" : "Describe what you see in the attached media."));
+
     // POST message to the internal server using exec + curl
     // Write to file first to avoid shell argument length limits (important for albums with many images)
     const messagePayload = JSON.stringify({
-      text: finalMessage,
+      text: messageWithContextClaude,
       botToken,
       chatId,
       userMessageId,
@@ -521,6 +884,7 @@ export async function handleAsk(
       images,
       mediaGroupId,
       document,
+      video,
       // Media paths for artifact integration (stored in /media or /tmp/media)
       mediaPaths: mediaPaths.map((m) => ({
         path: m.path,
@@ -549,7 +913,7 @@ export async function handleAsk(
       await sandbox.writeFile(
         "/workspace/input.json",
         JSON.stringify({
-          message: finalMessage,
+          message: messageWithContextClaude,
           claudeSessionId,
           botToken,
           chatId,
@@ -561,6 +925,7 @@ export async function handleAsk(
           images,
           mediaGroupId,
           document,
+          video,
           mediaPaths: mediaPaths.map((m) => ({
             path: m.path,
             type: m.type,

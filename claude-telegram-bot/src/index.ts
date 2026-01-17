@@ -5,7 +5,7 @@ import {
   createDefaultSession,
   getSessionKey,
 } from "../../shared/types/session";
-import { ImageData, DocumentData } from "../../shared/types/api";
+import { ImageData, DocumentData, VideoData } from "../../shared/types/api";
 import { TEST_USER_1, TEST_USER_2, TEST_GROUP_CHAT } from "../../shared/constants/testing";
 
 // Type definitions
@@ -430,6 +430,40 @@ async function fireAndForgetDocumentToSandbox(
         chatId,
         message: caption,
         document,
+        claudeSessionId,
+        botToken: env.BOT_TOKEN,
+        userMessageId,
+        senderId,
+        isGroup,
+      }),
+    })
+  );
+}
+
+/**
+ * Fire-and-forget: Send video to sandbox worker for processing.
+ */
+async function fireAndForgetVideoToSandbox(
+  env: Env,
+  chatId: string,
+  video: VideoData,
+  caption: string | undefined,
+  claudeSessionId: string | null,
+  userMessageId: number,
+  senderId: string,
+  isGroup: boolean
+): Promise<void> {
+  await env.SANDBOX_WORKER.fetch(
+    new Request("https://internal/ask", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": env.ANDEE_API_KEY || "",
+      },
+      body: JSON.stringify({
+        chatId,
+        message: caption,
+        video,
         claudeSessionId,
         botToken: env.BOT_TOKEN,
         userMessageId,
@@ -1285,6 +1319,139 @@ export default {
             body: JSON.stringify({
               chat_id: chatId,
               text: `Error processing document: ${err.message || "Unknown error"}`,
+            }),
+          });
+        })
+      );
+
+      // Return immediately - don't block the webhook
+    });
+
+    // Handle video messages - download and forward to worker for Gemini analysis
+    bot.on("message:video", async (botCtx) => {
+      const chatId = botCtx.chat.id;
+      const senderIdNum = botCtx.from?.id;
+      const senderId = senderIdNum?.toString() || chatId.toString();
+      const isGroup = isGroupChat(botCtx.chat.type);
+      const userMessageId = botCtx.message.message_id;
+      const video = botCtx.message.video;
+      const caption = botCtx.message.caption;
+
+      // Log user info
+      console.log(
+        `[AUTH] User ${botCtx.from?.username || "unknown"} (ID: ${senderId}) ` +
+        `sent video (${video.duration}s, ${video.file_size ? Math.round(video.file_size / 1024 / 1024) + "MB" : "?MB"}) in chat ${chatId}`
+      );
+
+      // Auth check
+      if (!isUserAllowed(senderIdNum)) {
+        console.log(`[AUTH] Rejected video from user ${senderId}`);
+        await botCtx.reply(
+          "I'm currently in private testing mode and not available for public use."
+        );
+        return;
+      }
+
+      // Size limit: 50MB for videos (Gemini API limit)
+      const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
+      if (video.file_size && video.file_size > MAX_VIDEO_SIZE) {
+        console.log(`[${chatId}] [VIDEO] Rejected: too large (${Math.round(video.file_size / 1024 / 1024)}MB, max 50MB)`);
+        await botCtx.reply("Video too large (max 50MB). Try a shorter clip!");
+        return;
+      }
+
+      console.log(
+        `[${chatId}] [VIDEO] Received video: ${video.duration}s, ` +
+        `${video.width}x${video.height}, ${video.file_size ? Math.round(video.file_size / 1024 / 1024) + "MB" : "?MB"}`
+      );
+
+      // React with eyes to show we're processing
+      try {
+        await botCtx.api.setMessageReaction(chatId, userMessageId, [
+          { type: "emoji", emoji: "👀" },
+        ]);
+      } catch (err) {
+        console.error(`[${chatId}] Failed to set reaction:`, err);
+      }
+
+      // Download the video file
+      console.log(`[${chatId}] [VIDEO] Downloading video from Telegram...`);
+      const downloadStart = Date.now();
+      const { data, error: downloadError } = await downloadTelegramFile(
+        env.BOT_TOKEN,
+        video.file_id
+      );
+
+      if (downloadError || data.byteLength === 0) {
+        console.error(`[${chatId}] [VIDEO] Download failed after ${Date.now() - downloadStart}ms: ${downloadError}`);
+        await botCtx.reply(
+          "Sorry, I couldn't download that video. Please try again."
+        );
+        return;
+      }
+
+      console.log(`[${chatId}] [VIDEO] Download complete in ${Date.now() - downloadStart}ms: ${data.byteLength} bytes`);
+
+      // Convert to base64
+      const bytes = new Uint8Array(data);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const videoBase64 = btoa(binary);
+
+      console.log(
+        `[${chatId}] [VIDEO] Encoded to base64: ${videoBase64.length} chars (~${Math.round(videoBase64.length * 0.75 / 1024 / 1024)}MB)`
+      );
+
+      // Build VideoData object
+      const videoData: VideoData = {
+        base64: videoBase64,
+        mediaType: video.mime_type || "video/mp4",
+        fileId: video.file_id,
+        duration: video.duration,
+        width: video.width,
+        height: video.height,
+        fileSize: video.file_size,
+        fileName: video.file_name,
+      };
+
+      // Get current session
+      const session = await getSession(env, chatId.toString(), senderId, isGroup);
+
+      console.log(
+        `[${chatId}] [VIDEO] Forwarding to sandbox-worker (session: ${session.claudeSessionId || "new"}, mediaType: ${videoData.mediaType})`
+      );
+
+      // Fire and forget - sandbox will handle Gemini analysis and response
+      ctx.waitUntil(
+        fireAndForgetVideoToSandbox(
+          env,
+          chatId.toString(),
+          videoData,
+          caption,
+          session.claudeSessionId,
+          userMessageId,
+          senderId,
+          isGroup
+        ).catch((err) => {
+          console.error(`[${chatId}] Error processing video:`, err);
+
+          // Skip error message for test users
+          if (isTestChat(chatId)) {
+            console.log(
+              `[TEST] Would have sent video error to ${chatId}: ${err.message || "Unknown error"}`
+            );
+            return;
+          }
+
+          // Try to send error message to real users
+          return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `Error processing video: ${err.message || "Unknown error"}`,
             }),
           });
         })

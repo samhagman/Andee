@@ -2,12 +2,12 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createServer } from "http";
-import { appendFileSync, writeFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
+import { appendFileSync, writeFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
 
 const PORT = 8080;
 const LOG_FILE = "/workspace/telegram_agent.log";
-const PERSONALITY_PATH = "/home/claude/.claude/PERSONALITY.md";
+const PERSONALITY_PATH = "/home/claude/CLAUDE.md";
 
 // Load personality prompt at startup (appended to system prompt)
 let personalityPrompt = "";
@@ -201,6 +201,68 @@ function log(msg) {
 // Note: memvid CLI requires content via --input <FILE>, not inline text
 // Storage: /media/conversation-history/{chatId}/memory.mv2 (R2 mount)
 // Models: /media/.memvid/models/ (shared across all chats)
+
+/**
+ * Check if error indicates TOC/file corruption
+ * Common errors: "TOC failed to decode", "sequence length exceeds", "footer"
+ */
+function isMemvidCorruption(errorMessage) {
+  const corruptionPatterns = [
+    'TOC',
+    'sequence length',
+    'footer',
+    'Deserialization error',
+    'unable to recover table of contents'
+  ];
+  return corruptionPatterns.some(pattern =>
+    errorMessage.toLowerCase().includes(pattern.toLowerCase())
+  );
+}
+
+/**
+ * Attempt to repair corrupted memvid file using doctor command
+ * Returns true if repair succeeded, false if it failed
+ */
+function tryMemvidDoctor(memoryFile, memvidEnv) {
+  log(`MEMVID_DOCTOR attempting repair of ${memoryFile}`);
+  try {
+    execSync(`memvid doctor "${memoryFile}"`, {
+      timeout: 60000, // 60s timeout for repair
+      env: memvidEnv
+    });
+    log(`MEMVID_DOCTOR repair succeeded`);
+    return true;
+  } catch (e) {
+    log(`MEMVID_DOCTOR repair failed: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Reset corrupted memory file by deleting and creating fresh
+ * WARNING: This loses all previous conversation history!
+ */
+function resetMemvidFile(memoryFile, memvidEnv) {
+  log(`MEMVID_RESET deleting corrupted file and creating fresh: ${memoryFile}`);
+  try {
+    // Delete corrupted file
+    if (existsSync(memoryFile)) {
+      unlinkSync(memoryFile);
+      log(`MEMVID_RESET deleted corrupted file`);
+    }
+    // Create fresh file
+    execSync(`memvid create "${memoryFile}"`, {
+      timeout: 60000,
+      env: memvidEnv
+    });
+    log(`MEMVID_RESET created fresh memory file (previous history lost)`);
+    return true;
+  } catch (e) {
+    log(`MEMVID_RESET failed: ${e.message}`);
+    return false;
+  }
+}
+
 function appendToMemvid(ctx, userMessage, assistantResponse) {
   try {
     // Determine memory file location (now uses chatId, stored in R2)
@@ -249,15 +311,63 @@ function appendToMemvid(ctx, userMessage, assistantResponse) {
       mkdirSync(tempDir, { recursive: true });
     }
 
+    // Track if we've already attempted recovery to avoid infinite loops
+    let recoveryAttempted = false;
+
+    // Helper to execute memvid put with auto-recovery on corruption
+    const memvidPutWithRecovery = (inputFile, title) => {
+      try {
+        execSync(`memvid put "${memoryFile}" --input "${inputFile}" --title "${title}" --label "conversation"`, {
+          timeout: 30000,
+          env: memvidEnv
+        });
+        return true;
+      } catch (e) {
+        if (isMemvidCorruption(e.message) && !recoveryAttempted) {
+          recoveryAttempted = true;
+          log(`MEMVID corruption detected, attempting recovery...`);
+
+          // Try doctor first
+          if (tryMemvidDoctor(memoryFile, memvidEnv)) {
+            // Doctor succeeded, retry the put
+            try {
+              execSync(`memvid put "${memoryFile}" --input "${inputFile}" --title "${title}" --label "conversation"`, {
+                timeout: 30000,
+                env: memvidEnv
+              });
+              log(`MEMVID retry after doctor succeeded`);
+              return true;
+            } catch (retryErr) {
+              log(`MEMVID retry after doctor failed: ${retryErr.message}`);
+            }
+          }
+
+          // Doctor failed or retry failed, reset the file
+          if (resetMemvidFile(memoryFile, memvidEnv)) {
+            // File reset, retry the put
+            try {
+              execSync(`memvid put "${memoryFile}" --input "${inputFile}" --title "${title}" --label "conversation"`, {
+                timeout: 30000,
+                env: memvidEnv
+              });
+              log(`MEMVID retry after reset succeeded`);
+              return true;
+            } catch (resetRetryErr) {
+              log(`MEMVID retry after reset failed: ${resetRetryErr.message}`);
+            }
+          }
+        }
+        throw e; // Re-throw if not corruption or recovery failed
+      }
+    };
+
     // Write user message to temp file and append using --input
     const userTempFile = `${tempDir}/user_${Date.now()}.txt`;
     try {
       writeFileSync(userTempFile, userMessage);
-      execSync(`memvid put "${memoryFile}" --input "${userTempFile}" --title "user @ ${timestamp}" --label "conversation"`, {
-        timeout: 30000,
-        env: memvidEnv
-      });
-      log("MEMVID appended user turn");
+      if (memvidPutWithRecovery(userTempFile, `user @ ${timestamp}`)) {
+        log("MEMVID appended user turn");
+      }
     } catch (e) {
       log(`MEMVID user append failed: ${e.message}`);
     } finally {
@@ -269,11 +379,9 @@ function appendToMemvid(ctx, userMessage, assistantResponse) {
     const assistantTempFile = `${tempDir}/assistant_${Date.now()}.txt`;
     try {
       writeFileSync(assistantTempFile, assistantResponse);
-      execSync(`memvid put "${memoryFile}" --input "${assistantTempFile}" --title "assistant @ ${timestamp}" --label "conversation"`, {
-        timeout: 30000,
-        env: memvidEnv
-      });
-      log("MEMVID appended assistant turn");
+      if (memvidPutWithRecovery(assistantTempFile, `assistant @ ${timestamp}`)) {
+        log("MEMVID appended assistant turn");
+      }
     } catch (e) {
       log(`MEMVID assistant append failed: ${e.message}`);
     } finally {

@@ -231,18 +231,22 @@ async function main() {
     });
 
     // Create PTY shell - proper terminal emulation
+    // Pass through all API keys for OpenCode/Goose MCP servers
     const shell = pty.spawn('bash', [], {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
-      cwd: '/workspace',
+      cwd: '/home/claude',
       env: {
         HOME: '/home/claude',
         USER: 'claude',
         TERM: 'xterm-256color',
         PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
         NODE_PATH: '/usr/local/lib/node_modules',
+        // API keys for AI engines and MCP servers
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
+        CEREBRAS_API_KEY: process.env.CEREBRAS_API_KEY || '',
+        PERPLEXITY_API_KEY: process.env.PERPLEXITY_API_KEY || '',
       },
     });
 

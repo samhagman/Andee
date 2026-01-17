@@ -99,6 +99,31 @@ export const GOOSE_PROVIDER_URL = "https://api.cerebras.ai";
 export const GOOSE_MAX_TURNS = 25;
 
 // ============================================================================
+// OpenCode Configuration (Persistent Server + Cerebras)
+// ============================================================================
+
+/**
+ * Port for the OpenCode server inside the container.
+ * OpenCode runs as a persistent HTTP server on this port.
+ */
+export const OPENCODE_PORT = 4096;
+
+/**
+ * Hostname for the OpenCode server (localhost inside container).
+ */
+export const OPENCODE_HOSTNAME = "127.0.0.1";
+
+/**
+ * Model identifier for OpenCode (provider/model format).
+ */
+export const OPENCODE_MODEL = "cerebras/zai-glm-4.7";
+
+/**
+ * Timeout for OpenCode operations (in milliseconds).
+ */
+export const OPENCODE_TIMEOUT_MS = 120_000;
+
+// ============================================================================
 // Paths
 // ============================================================================
 
