@@ -138,10 +138,7 @@ Format your response using Telegram-approved markdown:
 Be thorough - another AI will use your description to help the user.`,
     });
 
-    // Call Gemini via OpenRouter with timeout to prevent Worker timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
-
+    // Call Gemini via OpenRouter
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -153,7 +150,7 @@ Be thorough - another AI will use your description to help the user.`,
       body: JSON.stringify({
         model: "google/gemini-3-flash-preview",
         max_tokens: 4000,
-        thinking: "medium",  // Balance speed vs reasoning depth
+        thinking: "high",  // Enable deep reasoning for better media analysis
         messages: [
           {
             role: "user",
@@ -161,10 +158,7 @@ Be thorough - another AI will use your description to help the user.`,
           },
         ],
       }),
-      signal: controller.signal,
     });
-
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -178,10 +172,6 @@ Be thorough - another AI will use your description to help the user.`,
     console.log(`[Gemini Vision] Got description (${description.length} chars)`);
     return description;
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      console.error(`[Gemini Vision] Timeout after 25s`);
-      return `[Media analysis timed out - image not analyzed]`;
-    }
     console.error(`[Gemini Vision] Error:`, error);
     return `[Media analysis error: ${error instanceof Error ? error.message : "Unknown error"}]`;
   }
