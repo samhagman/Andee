@@ -14,6 +14,5 @@
 // Import scripts as raw text (Wrangler [[rules]] type = "Text" in wrangler.toml)
 import PERSISTENT_SERVER_SCRIPT from "./persistent-server.script.js";
 import AGENT_TELEGRAM_SCRIPT from "./agent-telegram.script.js";
-import OPENCODE_PERSISTENT_SERVER_SCRIPT from "./opencode-persistent-server.script.js";
 
-export { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT, OPENCODE_PERSISTENT_SERVER_SCRIPT };
+export { PERSISTENT_SERVER_SCRIPT, AGENT_TELEGRAM_SCRIPT };

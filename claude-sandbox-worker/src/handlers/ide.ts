@@ -525,9 +525,8 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
             TERM: "xterm-256color",
             PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             NODE_PATH: "/usr/local/lib/node_modules",
-            // API keys for AI engines (Claude, OpenCode/Cerebras) and MCP servers (Perplexity)
+            // API keys for Claude Agent SDK and MCP servers (Perplexity for web search)
             ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY || "",
-            CEREBRAS_API_KEY: ctx.env.CEREBRAS_API_KEY || "",
             PERPLEXITY_API_KEY: ctx.env.PERPLEXITY_API_KEY || "",
           },
         }
@@ -627,9 +626,8 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
             TERM: "xterm-256color",
             PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             NODE_PATH: "/usr/local/lib/node_modules",
-            // API keys for AI engines (Claude, OpenCode/Cerebras) and MCP servers (Perplexity)
+            // API keys for Claude Agent SDK and MCP servers (Perplexity for web search)
             ANTHROPIC_API_KEY: ctx.env.ANTHROPIC_API_KEY || "",
-            CEREBRAS_API_KEY: ctx.env.CEREBRAS_API_KEY || "",
             PERPLEXITY_API_KEY: ctx.env.PERPLEXITY_API_KEY || "",
           },
         }

@@ -58,12 +58,9 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   // OpenRouter toggle for local testing with alternative models
   USE_OPENROUTER?: string; // "true" to enable OpenRouter
-  OPENROUTER_API_KEY?: string; // OpenRouter API key
-  OPENROUTER_MODEL?: string; // e.g., "z-ai/glm-4.7"
-  // Engine selection: claude, goose, or opencode
-  USE_ENGINE?: string; // "claude", "goose", or "opencode"
-  CEREBRAS_API_KEY?: string; // Cerebras API key for GLM-4.7 (goose/opencode)
-  PERPLEXITY_API_KEY?: string; // Perplexity API key for web search MCP
+  OPENROUTER_API_KEY?: string; // OpenRouter API key (also used by analyze-video skill)
+  OPENROUTER_MODEL?: string; // e.g., "anthropic/claude-3-5-sonnet"
+  PERPLEXITY_API_KEY?: string; // Perplexity API key for IDE web search
   SESSIONS: R2Bucket;
   SNAPSHOTS: R2Bucket;
   MEDIA: R2Bucket; // Persistent media storage (photos, voice, documents)

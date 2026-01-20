@@ -277,6 +277,7 @@ Paths inside the container:
 | `/workspace/files/` | Working directory for file operations |
 | `/home/claude/.claude/skills/` | Skill definitions |
 | `/home/claude/.claude/CLAUDE.md` | Personality/style prompt (appended to system prompt) |
+| `/home/claude/opencode.json` | OpenCode config (MCP servers, providers) - generated at runtime |
 | `/workspace/persistent_server.mjs` | HTTP server script (written by Worker) |
 | `/workspace/telegram_agent.log` | Agent logs (view via `/logs` endpoint) |
 
