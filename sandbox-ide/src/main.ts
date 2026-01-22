@@ -10,7 +10,7 @@ import { SchedulesPanel } from "./components/SchedulesPanel";
 import { PreviewBanner } from "./components/PreviewBanner";
 import { showConfirmModal } from "./components/ConfirmModal";
 import { showErrorModal } from "./components/ErrorModal";
-import { restoreSnapshot } from "./lib/api";
+import { restoreSnapshot, createSnapshot } from "./lib/api";
 import { debug, AndeeDebug, enableFetchLogging } from "./lib/debug";
 import type { Sandbox, ConnectionStatus, PreviewState } from "./lib/types";
 
@@ -65,6 +65,7 @@ async function init() {
     snapshotPanel = new SnapshotPanel(snapshotContainer, {
       onPreview: handleEnterPreview,
       onRestore: handleRestore,
+      onTakeSnapshot: handleTakeSnapshot,
     });
   }
 
@@ -330,6 +331,48 @@ async function handleRestore(snapshotKey: string, markAsLatest: boolean): Promis
       title: "Restore Error",
       message: errorMessage,
       details: errorStack,
+    });
+  }
+}
+
+// Handle take snapshot
+async function handleTakeSnapshot(): Promise<void> {
+  if (!currentSandbox) return;
+
+  debug.snapshot('create-start', {
+    chatId: currentSandbox.chatId,
+  });
+
+  try {
+    const result = await createSnapshot(currentSandbox);
+
+    debug.snapshot('create-result', {
+      success: result.success,
+      key: result.key,
+      size: result.size,
+      error: result.error,
+    });
+
+    if (result.success) {
+      const sizeMB = ((result.size || 0) / 1024 / 1024).toFixed(2);
+      console.log(`[IDE] Snapshot created: ${result.key} (${sizeMB} MB)`);
+    } else {
+      console.error("[IDE] Snapshot creation failed:", result.error);
+      await showErrorModal({
+        title: "Snapshot Failed",
+        message: "Failed to create snapshot.",
+        details: result.error,
+      });
+    }
+  } catch (error) {
+    debug.snapshot('create-error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error("[IDE] Snapshot error:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    await showErrorModal({
+      title: "Snapshot Error",
+      message: errorMessage,
     });
   }
 }

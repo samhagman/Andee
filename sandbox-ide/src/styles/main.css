@@ -513,6 +513,36 @@ body {
   color: var(--text-primary);
 }
 
+.snapshot-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.snapshot-take-btn {
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.snapshot-take-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.snapshot-take-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .snapshot-list {
   max-height: 400px;
   overflow-y: auto;

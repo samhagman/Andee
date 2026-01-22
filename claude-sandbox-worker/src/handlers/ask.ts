@@ -11,7 +11,6 @@ import {
   HandlerContext,
   AskTelegramRequest,
   Env,
-  getSnapshotPrefix,
 } from "../types";
 import {
   SANDBOX_SLEEP_AFTER,
@@ -26,7 +25,35 @@ import {
   saveAllMedia,
   type MediaStorageResult,
 } from "../lib/media";
+import {
+  buildSdkEnv,
+  restoreFromSnapshot,
+  readUserTimezone,
+} from "../lib/container-startup";
 import type { VideoData } from "../../../shared/types/api";
+
+/**
+ * Write debug log to /tmp/ask-debug.log for debugging /ask failures.
+ * This is independent of the persistent server logs.
+ */
+async function writeDebugLog(
+  sandbox: InstanceType<typeof Sandbox>,
+  chatId: string,
+  stage: string,
+  data: Record<string, unknown> = {}
+): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const logEntry = JSON.stringify({ timestamp, stage, chatId, ...data });
+  // Escape single quotes and write to file
+  const escapedEntry = logEntry.replace(/'/g, "'\\''");
+  try {
+    await sandbox.exec(`echo '${escapedEntry}' >> /tmp/ask-debug.log`, {
+      timeout: 5000,
+    });
+  } catch {
+    // Silently ignore - debug logging should never break the main flow
+  }
+}
 
 /**
  * Build media context instruction for VIDEO ONLY.
@@ -61,120 +88,7 @@ Run the script with an appropriate question based on what the user is asking.
 `;
 }
 
-// Snapshot configuration
-const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
-const TAR_EXTRACT_TIMEOUT_MS = 60_000;
 
-/**
- * Build environment variables for Claude SDK based on provider toggle.
- * When USE_OPENROUTER=true, routes to OpenRouter with specified model.
- * Otherwise, uses Anthropic directly.
- */
-function buildSdkEnv(env: Env, userTimezone: string): Record<string, string> {
-  const baseEnv: Record<string, string> = {
-    HOME: "/home/claude",
-    TZ: userTimezone,
-    // Always include OPENROUTER_API_KEY for analyze-video skill (Gemini via OpenRouter)
-    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY || "",
-  };
-
-  if (env.USE_OPENROUTER === "true") {
-    // OpenRouter mode - route SDK through openrouter.ai
-    console.log(`[Worker] Using OpenRouter with model: ${env.OPENROUTER_MODEL || "z-ai/glm-4.7"}`);
-    return {
-      ...baseEnv,
-      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
-      ANTHROPIC_AUTH_TOKEN: env.OPENROUTER_API_KEY || "",
-      ANTHROPIC_API_KEY: "", // Must be blank for OpenRouter
-      ANTHROPIC_DEFAULT_SONNET_MODEL: env.OPENROUTER_MODEL || "z-ai/glm-4.7",
-    };
-  } else {
-    // Anthropic direct mode (default)
-    return {
-      ...baseEnv,
-      ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
-    };
-  }
-}
-
-/**
- * Restore filesystem from the latest snapshot if one exists.
- * Returns true if restored, false otherwise.
- */
-async function restoreFromSnapshot(
-  sandbox: InstanceType<typeof Sandbox>,
-  chatId: string,
-  senderId: string | undefined,
-  isGroup: boolean | undefined,
-  env: Env
-): Promise<boolean> {
-  if (!env.SNAPSHOTS) {
-    console.log(`[Worker] SNAPSHOTS binding not available, skipping restore`);
-    return false;
-  }
-
-  try {
-    // List snapshots for this chat using new prefix structure
-    const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
-    const listResult = await env.SNAPSHOTS.list({ prefix });
-
-    if (listResult.objects.length === 0) {
-      console.log(`[Worker] No snapshots found for chat ${chatId}`);
-      return false;
-    }
-
-    // Get latest snapshot (sorted by key which includes timestamp)
-    const latestKey = listResult.objects
-      .sort((a, b) => b.key.localeCompare(a.key))[0].key;
-
-    console.log(`[Worker] Restoring from snapshot: ${latestKey}`);
-
-    // Download snapshot from R2
-    const object = await env.SNAPSHOTS.get(latestKey);
-    if (!object) {
-      console.log(`[Worker] Snapshot not found in R2: ${latestKey}`);
-      return false;
-    }
-
-    // Convert to base64 using chunked approach to avoid stack overflow on large snapshots
-    // The spread operator (...new Uint8Array(arrayBuffer)) causes "Maximum call stack size exceeded"
-    // on files larger than ~500KB-1MB due to JavaScript's argument limit (~65K-130K)
-    const arrayBuffer = await object.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    const CHUNK_SIZE = 32768; // 32KB chunks
-    let binaryString = '';
-    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-      const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-      binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-    }
-    const base64Data = btoa(binaryString);
-
-    // Write snapshot to container
-    await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
-      encoding: "base64",
-    });
-
-    // Extract snapshot
-    const extractResult = await sandbox.exec(
-      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH}`,
-      { timeout: TAR_EXTRACT_TIMEOUT_MS }
-    );
-
-    if (extractResult.exitCode !== 0) {
-      console.error(`[Worker] Snapshot extract failed: ${extractResult.stderr}`);
-      return false;
-    }
-
-    // Clean up temp file
-    await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
-
-    console.log(`[Worker] Snapshot restored successfully for chat ${chatId}`);
-    return true;
-  } catch (error) {
-    console.error(`[Worker] Restore error:`, error);
-    return false;
-  }
-}
 
 /**
  * Transcribe audio using Cloudflare Workers AI (Whisper).
@@ -215,6 +129,51 @@ async function transcribeAudio(
       console.error(`[${chatId}] [VOICE] Stack trace: ${error.stack}`);
     }
     return { text: "", error: message };
+  }
+}
+
+/**
+ * GET /ask-debug?chatId=X
+ * Read the debug log for a given chatId to troubleshoot /ask failures.
+ */
+export async function handleAskDebug(
+  ctx: HandlerContext
+): Promise<Response> {
+  const chatId = ctx.url.searchParams.get("chatId");
+  if (!chatId) {
+    return Response.json(
+      { error: "Missing chatId query parameter" },
+      { status: 400, headers: CORS_HEADERS }
+    );
+  }
+
+  try {
+    const sandbox = getSandbox(ctx.env.Sandbox, `chat-${chatId}`, {});
+    const result = await sandbox.exec(
+      "cat /tmp/ask-debug.log 2>/dev/null || echo 'No debug log found'",
+      { timeout: 10000 }
+    );
+
+    // Parse as JSONL for nicer output
+    const lines = result.stdout.trim().split("\n").filter(Boolean);
+    const entries = lines.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { raw: line };
+      }
+    });
+
+    return Response.json(
+      { chatId, entries, raw: result.stdout },
+      { headers: CORS_HEADERS }
+    );
+  } catch (error) {
+    console.error("[Worker] ask-debug error:", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500, headers: CORS_HEADERS }
+    );
   }
 }
 
@@ -330,6 +289,17 @@ export async function handleAsk(
       sleepAfter: SANDBOX_SLEEP_AFTER,
     });
 
+    // Debug: Log that we got the sandbox
+    await writeDebugLog(sandbox, chatId, "START", {
+      senderId,
+      isGroup,
+      hasText,
+      hasImages,
+      hasDocument,
+      hasVideo,
+      hasAudio,
+    });
+
     // Mount R2 media bucket (or fallback to /tmp/media for local dev)
     let isLocalDev = false;
     let mediaPaths: MediaStorageResult[] = [];
@@ -340,6 +310,9 @@ export async function handleAsk(
       console.warn(`[${chatId}] Media mount failed, using local fallback:`, err);
       isLocalDev = true;
     }
+
+    // Debug: Log media mount status
+    await writeDebugLog(sandbox, chatId, "MEDIA_MOUNTED", { isLocalDev });
 
     // Save incoming media to storage (photos, voice, documents, video)
     const hasMedia = hasImages || audioBase64 || hasDocument || hasVideo;
@@ -381,39 +354,34 @@ export async function handleAsk(
       : `${requestUrl.protocol}//${requestUrl.host}`;
 
     // Check if persistent server is running
+    await writeDebugLog(sandbox, chatId, "CHECKING_SERVER", {});
     const processes = await sandbox.listProcesses();
     const serverProcess = processes.find((p) =>
       p.command?.includes("persistent_server.mjs")
     );
+    await writeDebugLog(sandbox, chatId, "SERVER_CHECK_COMPLETE", {
+      serverRunning: !!serverProcess,
+      processCount: processes.length,
+    });
 
     if (!serverProcess) {
       console.log(`[Worker] Starting persistent server for chat ${chatId}`);
+      await writeDebugLog(sandbox, chatId, "SERVER_NOT_RUNNING", {});
 
       // Restore from snapshot if available (fresh container)
+      await writeDebugLog(sandbox, chatId, "RESTORING_SNAPSHOT", {});
       const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
+      await writeDebugLog(sandbox, chatId, "SNAPSHOT_RESTORED", { restored });
       if (restored) {
         console.log(`[Worker] Filesystem restored from snapshot for chat ${chatId}`);
       }
 
       // Read user timezone from preferences (if they exist)
-      let userTimezone = "UTC";
-      if (senderId) {
-        const prefsPath = `/home/claude/private/${senderId}/preferences.yaml`;
-        const prefsResult = await sandbox.exec(
-          `cat ${prefsPath} 2>/dev/null || echo ""`,
-          { timeout: QUICK_COMMAND_TIMEOUT_MS }
-        );
-
-        if (prefsResult.stdout.includes("timezone:")) {
-          const match = prefsResult.stdout.match(/timezone:\s*([^\n]+)/);
-          if (match) {
-            userTimezone = match[1].trim();
-            console.log(`[Worker] User ${senderId} timezone: ${userTimezone}`);
-          }
-        }
-      }
+      const userTimezone = await readUserTimezone(sandbox, senderId);
+      await writeDebugLog(sandbox, chatId, "TIMEZONE_READ", { userTimezone });
 
       // Write the persistent server script
+      await writeDebugLog(sandbox, chatId, "WRITING_SERVER_SCRIPT", {});
       await sandbox.writeFile(
         "/workspace/persistent_server.mjs",
         PERSISTENT_SERVER_SCRIPT
@@ -425,26 +393,35 @@ export async function handleAsk(
       });
 
       // Start the persistent server with proper environment variables
+      await writeDebugLog(sandbox, chatId, "STARTING_SERVER", {});
       const server = await sandbox.startProcess(
         "node /workspace/persistent_server.mjs",
         {
           env: buildSdkEnv(ctx.env, userTimezone),
         }
       );
+      await writeDebugLog(sandbox, chatId, "SERVER_STARTED", { pid: server.pid });
 
       // Wait for server to be ready on configured port (3000 is used by Sandbox infrastructure)
       console.log(`[Worker] Waiting for server to be ready...`);
+      await writeDebugLog(sandbox, chatId, "WAITING_FOR_PORT", {
+        port: PERSISTENT_SERVER_PORT,
+        timeout: SERVER_STARTUP_TIMEOUT_MS,
+      });
       await server.waitForPort(PERSISTENT_SERVER_PORT, {
         path: "/health",
         timeout: SERVER_STARTUP_TIMEOUT_MS,
         status: { min: 200, max: 299 },
       });
+      await writeDebugLog(sandbox, chatId, "PORT_READY", {});
 
       console.log(`[Worker] Persistent server ready for chat ${chatId}`);
+      await writeDebugLog(sandbox, chatId, "SERVER_READY", {});
     } else {
       console.log(
         `[Worker] Persistent server already running for chat ${chatId}`
       );
+      await writeDebugLog(sandbox, chatId, "SERVER_ALREADY_RUNNING", {});
     }
 
     // Build media context for VIDEO only (Claude has native vision for images)
@@ -483,12 +460,21 @@ export async function handleAsk(
     });
 
     // Write payload to temp file (avoids "Argument list too long" for large payloads)
+    await writeDebugLog(sandbox, chatId, "POSTING_MESSAGE", {
+      payloadSize: messagePayload.length,
+    });
     await sandbox.writeFile("/tmp/message.json", messagePayload);
 
     const curlResult = await sandbox.exec(
       `curl -s -X POST http://localhost:${PERSISTENT_SERVER_PORT}/message -H 'Content-Type: application/json' -d @/tmp/message.json`,
       { timeout: CURL_TIMEOUT_MS }
     );
+
+    await writeDebugLog(sandbox, chatId, "CURL_COMPLETE", {
+      exitCode: curlResult.exitCode,
+      stdout: curlResult.stdout?.substring(0, 200),
+      stderr: curlResult.stderr?.substring(0, 200),
+    });
 
     if (curlResult.exitCode !== 0) {
       console.error(`[Worker] Failed to post message: ${curlResult.stderr}`);
@@ -533,10 +519,12 @@ export async function handleAsk(
         `${envVarsString} nohup node /workspace/telegram_agent.mjs > /workspace/telegram_agent.log 2>&1 &`,
         { timeout: QUICK_COMMAND_TIMEOUT_MS }
       );
+      await writeDebugLog(sandbox, chatId, "LEGACY_FALLBACK_STARTED", {});
     } else {
       console.log(`[Worker] Message queued: ${curlResult.stdout}`);
     }
 
+    await writeDebugLog(sandbox, chatId, "COMPLETE", { success: true });
     return Response.json({ started: true, chatId }, { headers: CORS_HEADERS });
   } catch (error) {
     console.error("[Worker] Telegram endpoint error:", error);

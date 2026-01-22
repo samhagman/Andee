@@ -3,9 +3,10 @@
  */
 
 export { handleHealth } from "./health";
-export { handleAsk } from "./ask";
+export { handleAsk, handleAskDebug } from "./ask";
 export { handleDiag } from "./diag";
 export { handleLogs } from "./logs";
+export { handleTranscripts } from "./transcripts";
 export { handleRestart } from "./restart";
 export { handleFactoryReset } from "./factory-reset";
 export { handleSessionUpdate } from "./sessionUpdate";

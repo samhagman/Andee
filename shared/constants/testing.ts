@@ -6,7 +6,7 @@
  * - Isolation is automatic via senderId (no special handling needed)
  * - The only difference is recognizable IDs that won't conflict with real Telegram users
  *
- * Use these instead of real user IDs (7821047187, 7580981566) when testing
+ * Use these instead of real user IDs (SAM_PROD_USER, SHERLY_PROD_USER) when testing
  * to avoid polluting real user data.
  */
 
@@ -22,3 +22,11 @@ export const TEST_CHAT_2 = TEST_USER_2;
 
 // For group chat testing (negative IDs with -100 prefix)
 export const TEST_GROUP_CHAT = '-100999999999';
+
+// Production user IDs for debugging
+export const SAM_PROD_USER = '7821047187';
+export const SHERLY_PROD_USER = '7580981566';
+
+// Production group chats for debugging
+// Sam and Sherly's shared production group chat
+export const SAM_AND_SHERLY_PROD_GROUP = '-1003285272358';

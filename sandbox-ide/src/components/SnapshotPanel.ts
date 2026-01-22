@@ -9,6 +9,7 @@ import { showConfirmModal } from "./ConfirmModal";
 export interface SnapshotPanelCallbacks {
   onPreview: (snapshotKey: string, snapshotDate: string) => void;
   onRestore: (snapshotKey: string, markAsLatest: boolean) => Promise<void>;
+  onTakeSnapshot: () => Promise<void>;
 }
 
 export class SnapshotPanel {
@@ -17,6 +18,7 @@ export class SnapshotPanel {
   private snapshots: SnapshotInfo[] = [];
   private isOpen = false;
   private isLoading = false;
+  private isTakingSnapshot = false;
   private callbacks: SnapshotPanelCallbacks;
 
   constructor(container: HTMLElement, callbacks: SnapshotPanelCallbacks) {
@@ -119,6 +121,24 @@ export class SnapshotPanel {
   }
 
   /**
+   * Handle take snapshot button click.
+   */
+  private async handleTakeSnapshot(): Promise<void> {
+    if (!this.sandbox || this.isTakingSnapshot) return;
+
+    this.isTakingSnapshot = true;
+    this.render();
+
+    try {
+      await this.callbacks.onTakeSnapshot();
+      await this.refresh();
+    } finally {
+      this.isTakingSnapshot = false;
+      this.render();
+    }
+  }
+
+  /**
    * Setup click outside handler to close dropdown.
    */
   private setupClickOutside(): void {
@@ -193,7 +213,12 @@ export class SnapshotPanel {
           <div class="snapshot-dropdown">
             <div class="snapshot-dropdown-header">
               <span>Snapshots</span>
-              <button class="snapshot-close">&times;</button>
+              <div class="snapshot-header-actions">
+                <button class="snapshot-take-btn" ${this.isTakingSnapshot ? "disabled" : ""}>
+                  ${this.isTakingSnapshot ? "Taking..." : "📸 Take"}
+                </button>
+                <button class="snapshot-close">&times;</button>
+              </div>
             </div>
             <div class="snapshot-list">
               ${this.renderSnapshotList()}
@@ -219,6 +244,14 @@ export class SnapshotPanel {
       closeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.close();
+      });
+    }
+
+    const takeBtn = this.container.querySelector(".snapshot-take-btn") as HTMLButtonElement;
+    if (takeBtn && !this.isTakingSnapshot) {
+      takeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.handleTakeSnapshot();
       });
     }
 

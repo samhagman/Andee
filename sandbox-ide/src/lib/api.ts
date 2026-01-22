@@ -12,6 +12,7 @@ import type {
   SnapshotFileResponse,
   RestoreRequest,
   RestoreResponse,
+  CreateSnapshotResponse,
   GetScheduleConfigResponse,
   SaveScheduleConfigResponse,
   ListScheduleRunsResponse,
@@ -197,6 +198,20 @@ export async function restoreSnapshot(
   return fetchApi<RestoreResponse>("/restore", {
     method: "POST",
     body: JSON.stringify(request),
+  });
+}
+
+// Create a new snapshot
+export async function createSnapshot(
+  sandbox: Sandbox
+): Promise<CreateSnapshotResponse> {
+  return fetchApi<CreateSnapshotResponse>("/snapshot", {
+    method: "POST",
+    body: JSON.stringify({
+      chatId: sandbox.chatId,
+      senderId: sandbox.isGroup ? "groups" : sandbox.senderId,
+      isGroup: sandbox.isGroup,
+    }),
   });
 }
 

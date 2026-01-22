@@ -200,6 +200,13 @@ export async function uploadLargeFileToR2(
 /**
  * Download a large file from R2 and write to container in chunks.
  *
+ * @deprecated Prefer using presigned URLs with curl for new code.
+ * See container-startup.ts:restoreFromSnapshot() for the better approach
+ * that bypasses Worker memory entirely.
+ *
+ * This function is kept for IDE and /restore endpoints that haven't been
+ * migrated yet.
+ *
  * Process:
  * 1. Stream R2 object body
  * 2. Accumulate chunks until 5MB

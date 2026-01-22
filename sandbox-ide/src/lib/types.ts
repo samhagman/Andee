@@ -121,6 +121,14 @@ export interface RestoreResponse {
   error?: string;
 }
 
+export interface CreateSnapshotResponse {
+  success: boolean;
+  key?: string;
+  size?: number;
+  directories?: string[];
+  error?: string;
+}
+
 // Preview mode state
 export interface PreviewState {
   active: boolean;

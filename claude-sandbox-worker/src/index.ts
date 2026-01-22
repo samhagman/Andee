@@ -8,6 +8,7 @@
  *   GET  /                  Health check (no auth)
  *   GET  /diag              Diagnostic tests
  *   GET  /logs              Read agent logs
+ *   GET  /transcripts       Read Claude SDK session transcripts
  *   POST /ask               Fire-and-forget (persistent server)
  *   POST /restart           Restart container (keeps session)
  *   POST /factory-reset     Wipe sandbox and session (fresh start)
@@ -40,8 +41,10 @@ import { debug } from "./lib/debug";
 import {
   handleHealth,
   handleAsk,
+  handleAskDebug,
   handleDiag,
   handleLogs,
+  handleTranscripts,
   handleRestart,
   handleFactoryReset,
   handleSessionUpdate,
@@ -157,9 +160,21 @@ export default {
         }
         break;
 
+      case "/transcripts":
+        if (request.method === "GET") {
+          return handleTranscripts(ctx);
+        }
+        break;
+
       case "/ask":
         if (request.method === "POST") {
           return handleAsk(ctx);
+        }
+        break;
+
+      case "/ask-debug":
+        if (request.method === "GET") {
+          return handleAskDebug(ctx);
         }
         break;
 

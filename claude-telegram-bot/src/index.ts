@@ -248,7 +248,7 @@ async function fireAndForgetToSandbox(
   isGroup: boolean
 ): Promise<void> {
   // This call returns quickly - the sandbox worker handles the rest
-  await env.SANDBOX_WORKER.fetch(
+  const response = await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask", {
       method: "POST",
       headers: {
@@ -266,6 +266,13 @@ async function fireAndForgetToSandbox(
       })
     })
   );
+
+  // Check for error responses - don't silently swallow errors
+  if (!response.ok) {
+    const body = await response.text().catch(() => "Unknown error");
+    console.error(`[${chatId}] Sandbox worker error: ${response.status} - ${body}`);
+    throw new Error(`Sandbox returned ${response.status}: ${body}`);
+  }
 }
 
 /**
@@ -322,7 +329,7 @@ async function fireAndForgetVoiceToSandbox(
   senderId: string,
   isGroup: boolean
 ): Promise<void> {
-  await env.SANDBOX_WORKER.fetch(
+  const response = await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask", {
       method: "POST",
       headers: {
@@ -341,6 +348,13 @@ async function fireAndForgetVoiceToSandbox(
       }),
     })
   );
+
+  // Check for error responses - don't silently swallow errors
+  if (!response.ok) {
+    const body = await response.text().catch(() => "Unknown error");
+    console.error(`[${chatId}] Sandbox worker voice error: ${response.status} - ${body}`);
+    throw new Error(`Sandbox returned ${response.status}: ${body}`);
+  }
 }
 
 /**
@@ -384,7 +398,7 @@ async function fireAndForgetPhotosToSandbox(
   senderId: string,
   isGroup: boolean
 ): Promise<void> {
-  await env.SANDBOX_WORKER.fetch(
+  const response = await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask", {
       method: "POST",
       headers: {
@@ -404,6 +418,13 @@ async function fireAndForgetPhotosToSandbox(
       }),
     })
   );
+
+  // Check for error responses - don't silently swallow errors
+  if (!response.ok) {
+    const body = await response.text().catch(() => "Unknown error");
+    console.error(`[${chatId}] Sandbox worker photos error: ${response.status} - ${body}`);
+    throw new Error(`Sandbox returned ${response.status}: ${body}`);
+  }
 }
 
 /**
@@ -419,7 +440,7 @@ async function fireAndForgetDocumentToSandbox(
   senderId: string,
   isGroup: boolean
 ): Promise<void> {
-  await env.SANDBOX_WORKER.fetch(
+  const response = await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask", {
       method: "POST",
       headers: {
@@ -438,6 +459,13 @@ async function fireAndForgetDocumentToSandbox(
       }),
     })
   );
+
+  // Check for error responses - don't silently swallow errors
+  if (!response.ok) {
+    const body = await response.text().catch(() => "Unknown error");
+    console.error(`[${chatId}] Sandbox worker document error: ${response.status} - ${body}`);
+    throw new Error(`Sandbox returned ${response.status}: ${body}`);
+  }
 }
 
 /**
@@ -453,7 +481,7 @@ async function fireAndForgetVideoToSandbox(
   senderId: string,
   isGroup: boolean
 ): Promise<void> {
-  await env.SANDBOX_WORKER.fetch(
+  const response = await env.SANDBOX_WORKER.fetch(
     new Request("https://internal/ask", {
       method: "POST",
       headers: {
@@ -472,6 +500,13 @@ async function fireAndForgetVideoToSandbox(
       }),
     })
   );
+
+  // Check for error responses - don't silently swallow errors
+  if (!response.ok) {
+    const body = await response.text().catch(() => "Unknown error");
+    console.error(`[${chatId}] Sandbox worker video error: ${response.status} - ${body}`);
+    throw new Error(`Sandbox returned ${response.status}: ${body}`);
+  }
 }
 
 /**

@@ -11,27 +11,14 @@ import {
   ResetRequest,
   getSnapshotKey,
 } from "../types";
-import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import {
+  SANDBOX_SLEEP_AFTER,
+  SNAPSHOT_DIRS,
+  SNAPSHOT_TMP_PATH,
+  TAR_TIMEOUT_MS,
+  buildCreateExcludeFlags,
+} from "../../../shared/config";
 import { clearTerminalUrlCache } from "./ide";
-
-// Snapshot configuration (shared with snapshot.ts and factory-reset.ts)
-const SNAPSHOT_DIRS = ["/workspace", "/home/claude"];
-const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
-const TAR_TIMEOUT_MS = 60_000;
-
-// Directories to exclude from snapshots
-// /media is R2-mounted and persisted separately - don't include in snapshots
-// Legacy memvid paths excluded since conversation history now lives in R2
-const SNAPSHOT_EXCLUDES: string[] = [
-  "/media",
-  "/media/*",
-  "/home/claude/.memvid",       // Legacy embedding models location (~133MB)
-  "/home/claude/shared/*.mv2",  // Legacy shared conversation memory
-  "/home/claude/private",       // Legacy private user memory directories
-];
-const TAR_EXCLUDE_FLAGS = SNAPSHOT_EXCLUDES.length > 0
-  ? SNAPSHOT_EXCLUDES.map(e => `--exclude='${e}'`).join(" ")
-  : "";
 
 export async function handleRestart(ctx: HandlerContext): Promise<Response> {
   try {
@@ -70,7 +57,8 @@ export async function handleRestart(ctx: HandlerContext): Promise<Response> {
         console.log(`[Worker] Creating pre-restart snapshot for chat ${chatId}`);
 
         // Create tar archive (excluding large caches like .memvid models)
-        const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${TAR_EXCLUDE_FLAGS} ${dirsToBackup.join(" ")} 2>/dev/null`;
+        const createExcludes = buildCreateExcludeFlags();
+        const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${createExcludes} ${dirsToBackup.join(" ")} 2>/dev/null`;
         const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
 
         if (tarResult.exitCode === 0) {

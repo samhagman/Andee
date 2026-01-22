@@ -18,13 +18,13 @@ import {
   QUICK_COMMAND_TIMEOUT_MS,
   CURL_TIMEOUT_MS,
   SERVER_STARTUP_TIMEOUT_MS,
+  SNAPSHOT_TMP_PATH,
+  TAR_TIMEOUT_MS,
+  buildRestoreExcludeFlags,
 } from "../../../shared/config";
 import { PERSISTENT_SERVER_SCRIPT } from "../scripts";
 import { mountMediaBucket } from "../lib/media";
 
-// Snapshot configuration
-const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
-const TAR_EXTRACT_TIMEOUT_MS = 60_000;
 
 /**
  * Build environment variables for Claude SDK.
@@ -103,9 +103,11 @@ async function restoreFromSnapshot(
       encoding: "base64",
     });
 
+    // Extract snapshot (excluding system files that come from Dockerfile)
+    const restoreExcludes = buildRestoreExcludeFlags();
     const extractResult = await sandbox.exec(
-      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH}`,
-      { timeout: TAR_EXTRACT_TIMEOUT_MS }
+      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH} ${restoreExcludes}`,
+      { timeout: TAR_TIMEOUT_MS }
     );
 
     if (extractResult.exitCode !== 0) {

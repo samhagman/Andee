@@ -8,6 +8,7 @@ Troubleshooting and debugging Andee issues.
 - [Real-time Log Tailing](#real-time-log-tailing)
 - [Agent Logs](#agent-logs)
 - [Log Event Reference](#log-event-reference)
+- [Claude SDK Transcripts (Internal Reasoning)](#claude-sdk-transcripts-internal-reasoning)
 - [Storage Locations](#storage-locations)
 - [Diagnostics](#diagnostics)
 - [Resetting Sandboxes](#resetting-sandboxes)
@@ -31,6 +32,7 @@ For interactive debugging, use the Sandbox IDE at https://andee-ide.pages.dev/
 | **Terminal** | Run commands interactively in the container |
 | **File browser** | Navigate any path (/workspace, /home/claude, etc.) |
 | **Editor** | View/edit files with Monaco (VS Code editor) |
+| **Snapshots** | Take, preview, and restore filesystem snapshots (📷 button) |
 
 ### Terminal Capabilities
 
@@ -224,6 +226,128 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 
 ---
 
+## Claude SDK Transcripts (Internal Reasoning)
+
+The `/logs` endpoint shows high-level agent events, but for deep debugging you need
+Claude's **internal transcripts** - the JSONL files containing thinking and tool calls.
+
+### Where Transcripts Live
+
+Inside the container:
+```
+/home/claude/.claude/projects/-workspace-files/
+├── {sessionId}.jsonl           ← Main conversation transcript
+└── subagents/
+    └── agent-{id}.jsonl        ← Subagent transcripts
+```
+
+### Quick Access via /transcripts Endpoint
+
+```bash
+# List all sessions for a chat
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Get the latest transcript (newest first)
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Get just the thinking blocks (most useful for debugging)
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Get just the tool calls
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Pagination - get last 3 entries
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+
+# Page 2 (skip first 3)
+curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3&offset=3" \
+  -H "X-API-Key: $ANDEE_API_KEY"
+```
+
+### Transcript Structure
+
+Each JSONL line is an entry. **Content is an array of blocks**, not flat fields:
+
+```json
+{
+  "type": "assistant",
+  "timestamp": "2026-01-20T11:00:33.520Z",
+  "message": {
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "The user wants a weather report. I should use the weather skill..."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01...",
+        "name": "Skill",
+        "input": { "skill": "weather", "args": "Boston" }
+      },
+      {
+        "type": "text",
+        "text": "Good morning! Here's the weather..."
+      }
+    ]
+  }
+}
+```
+
+**Content block types:**
+| Block Type | Contains |
+|------------|----------|
+| `thinking` | Claude's internal reasoning (THE GOLD for debugging) |
+| `tool_use` | Tool call with name and input arguments |
+| `text` | Final text response to user |
+| `tool_result` | Result returned from a tool |
+
+### IDE Terminal Access
+
+```bash
+# List all session files
+ls -la /home/claude/.claude/projects/-workspace-files/*.jsonl
+
+# Extract thinking blocks (inside content array)
+cat /home/claude/.claude/projects/-workspace-files/*.jsonl | \
+  jq -r 'select(.message.content) | .message.content[] | select(.type=="thinking") | .thinking'
+
+# List all tool calls Claude made
+cat /home/claude/.claude/projects/-workspace-files/*.jsonl | \
+  jq -r 'select(.message.content) | .message.content[] | select(.type=="tool_use") | .name'
+```
+
+### Debugging Example: Slow Image Processing
+
+When image processing is slow, check what tools Claude called:
+
+```bash
+# Via API - quick tool list
+curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
+  -H "X-API-Key: $ANDEE_API_KEY" | jq '.tools[] | .name'
+
+# Via API - what was Claude thinking?
+curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
+  -H "X-API-Key: $ANDEE_API_KEY" | jq '.thinking[] | .thinking'
+```
+
+If you see `analyzing-media` skill being invoked when it shouldn't be (Claude has native vision), that's your culprit. The thinking blocks will show WHY Claude chose that tool.
+
+### Comparing /logs vs /transcripts
+
+| `/logs` (Agent Log) | `/transcripts` (Claude SDK) |
+|---------------------|----------------------------|
+| High-level events | Full conversation detail |
+| MESSAGE, TOOL_START, COMPLETE | Actual tool arguments, thinking |
+| Good for timing/flow | Good for "why did Claude do X?" |
+| `/workspace/telegram_agent.log` | `/home/claude/.claude/projects/-workspace-files/*.jsonl` |
+
+---
+
 ## Storage Locations
 
 | Location | Purpose |
@@ -340,15 +464,22 @@ npx wrangler r2 object get andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00
 - Restore happens in both `/ask` endpoint (Telegram messages) and `/files` endpoint (IDE)
 - The latest snapshot (by timestamp) is always used
 - IDE uses marker file `/tmp/.ide-initialized` to track if auto-restore already happened
+- **No size limits**: Both endpoints use presigned URL + curl, supporting snapshots of any size
 
-### IDE Snapshot Restore
+### IDE Snapshot Management
 
-The Sandbox IDE supports browsing and restoring historical snapshots via the 📷 button:
+The Sandbox IDE supports creating, browsing, and restoring snapshots via the 📷 button:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  IDE SNAPSHOT RESTORE                                                   │
+│  IDE SNAPSHOT MANAGEMENT                                                │
 ├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  📸 Take: Create a new snapshot immediately                             │
+│     - Button in dropdown header next to × close button                  │
+│     - Backs up /workspace and /home/claude to R2                        │
+│     - Shows loading state ("Taking...") during creation                 │
+│     - New snapshot appears at top of list with LATEST badge             │
 │                                                                         │
 │  👁 Preview: Browse snapshot without restoring                          │
 │     - Downloads tar to /tmp, lists with tar -tzf                        │
@@ -356,12 +487,16 @@ The Sandbox IDE supports browsing and restoring historical snapshots via the �
 │     - Useful for checking "what's in this old snapshot?"                │
 │                                                                         │
 │  ↩ Restore: Replace container files with snapshot                       │
-│     1. Download snapshot from R2                                        │
-│     2. Clear /workspace/* and /home/claude/*                            │
-│     3. Extract tar.gz to container                                      │
+│     1. Generate presigned URL for R2 snapshot                           │
+│     2. Container curls directly from R2 (bypasses Worker limits)        │
+│     3. Extract tar.gz excluding system files (.claude/skills, etc.)     │
 │     4. Copy snapshot to R2 as "latest" (markAsLatest)                   │
 │     5. Session may become stale → click "Restart Sandbox"               │
-│     6. Fresh container auto-restores from R2 latest                     │
+│                                                                         │
+│  Auto-restore on IDE access:                                            │
+│     - `maybeAutoRestore()` in ide.ts checks /tmp/.ide-initialized       │
+│     - If missing, calls `restoreFromSnapshot()` from container-startup  │
+│     - Uses same presigned URL approach - NO size limits                 │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -370,11 +505,11 @@ The Sandbox IDE supports browsing and restoring historical snapshots via the �
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| Large snapshot stack overflow | `Maximum call stack size exceeded` on restore/preview | Use chunked base64 (32KB chunks), not `btoa(String.fromCharCode(...new Uint8Array(arr)))` |
 | Session stale after restore | `Unknown Error, TODO` when browsing files | Click "Restart Sandbox" - fresh container will auto-restore from R2 |
-| Files lost after restart | Files were there, now gone | This was a bug (now fixed). `handleFiles()` now auto-restores from R2 on fresh containers |
+| Files lost after restart | Files were there, now gone | Fixed (2026-01-22). IDE `maybeAutoRestore()` now uses `restoreFromSnapshot()` with presigned URLs - no size limits |
 | markAsLatest failed | Response shows `markAsLatestError` | markAsLatest now copies original snapshot to R2 instead of re-tarring (avoids session staleness) |
-| Preview fails on large files | 500 error on `/snapshot-files` | Same chunked base64 fix needed in snapshot-preview.ts |
+
+**Note**: Large snapshot issues (stack overflow, 10MB limits) have been resolved. Both `/ask` and `/files` endpoints now use `restoreFromSnapshot()` from `container-startup.ts`, which downloads snapshots via presigned URL + curl directly in the container, bypassing all Worker memory/RPC limits.
 
 ### Restore Endpoints
 

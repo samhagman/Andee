@@ -10,20 +10,18 @@
  */
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { CORS_HEADERS, HandlerContext, Env, getSnapshotPrefix } from "../types";
+import { CORS_HEADERS, HandlerContext, Env } from "../types";
 import { debug } from "../lib/debug";
-import { downloadLargeFileFromR2, STREAMING_THRESHOLD } from "../lib/streaming";
+import { restoreFromSnapshot } from "../lib/container-startup";
 
 // Auto-restore configuration
 const IDE_INIT_MARKER = "/tmp/.ide-initialized";
-const SNAPSHOT_TMP_PATH = "/tmp/restore.tar.gz";
-const TAR_TIMEOUT_MS = 60_000;
-// Skip auto-restore for snapshots larger than this (would timeout)
-// User can manually restore from snapshot panel
-const MAX_AUTO_RESTORE_SIZE = 10 * 1024 * 1024; // 10MB
 
 /**
  * Check if container needs initialization and restore from R2 if so.
+ * Uses the shared restoreFromSnapshot() function which supports any snapshot size
+ * via presigned URL downloads (no Worker memory/RPC limits).
+ *
  * Returns true if restore happened, false otherwise.
  */
 async function maybeAutoRestore(
@@ -34,114 +32,32 @@ async function maybeAutoRestore(
   // Parse chatId and isGroup from sandboxId (format: chat-{chatId} or chat--{groupId})
   const chatId = sandboxId.replace(/^chat-/, "");
   const isGroup = chatId.startsWith("-");
-  const senderId = isGroup ? "groups" : undefined;
+  // For groups: use "groups" as senderId (shared storage)
+  // For private chats: chatId == userId in Telegram, so use chatId as senderId
+  const senderId = isGroup ? "groups" : chatId;
 
-  // Check if already initialized
+  // Check if already initialized (avoid re-restoring on every IDE request)
   const markerCheck = await sandbox.exec(`test -f ${IDE_INIT_MARKER} && echo "EXISTS"`, { timeout: 5000 });
   if (markerCheck.stdout.includes("EXISTS")) {
     debug.ide("auto-restore-skipped", sandboxId, { reason: "already initialized" });
     return false;
   }
 
-  // Check for R2 snapshot
-  if (!env.SNAPSHOTS) {
-    debug.ide("auto-restore-skipped", sandboxId, { reason: "no SNAPSHOTS binding" });
-    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-    return false;
+  // Delegate to the shared restore function (supports any size via presigned URLs)
+  debug.ide("auto-restore-start", sandboxId, { chatId, isGroup });
+  const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, env);
+
+  // Mark as initialized regardless of outcome (avoid retry loops)
+  await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 }).catch(() => {});
+
+  if (restored) {
+    debug.ide("auto-restore-success", sandboxId, { chatId });
+    console.log(`[IDE] Auto-restored ${sandboxId} from snapshot`);
+  } else {
+    debug.ide("auto-restore-skipped", sandboxId, { reason: "no snapshot or restore failed" });
   }
 
-  try {
-    const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
-    const listResult = await env.SNAPSHOTS.list({ prefix });
-
-    if (listResult.objects.length === 0) {
-      debug.ide("auto-restore-skipped", sandboxId, { reason: "no snapshots found", prefix });
-      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-      return false;
-    }
-
-    // Get latest snapshot
-    const latestKey = listResult.objects.sort((a, b) => b.key.localeCompare(a.key))[0].key;
-    debug.ide("auto-restore-start", sandboxId, { snapshotKey: latestKey });
-
-    // Download from R2
-    const object = await env.SNAPSHOTS.get(latestKey);
-    if (!object) {
-      debug.ide("auto-restore-skipped", sandboxId, { reason: "snapshot not found in R2" });
-      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-      return false;
-    }
-
-    const snapshotSize = object.size;
-    debug.ide("auto-restore-size", sandboxId, { snapshotSize, threshold: STREAMING_THRESHOLD });
-
-    // Skip auto-restore for very large snapshots (would timeout)
-    if (snapshotSize > MAX_AUTO_RESTORE_SIZE) {
-      debug.ide("auto-restore-skipped", sandboxId, {
-        reason: "snapshot too large",
-        snapshotSize,
-        maxSize: MAX_AUTO_RESTORE_SIZE,
-      });
-      console.log(
-        `[IDE] Skipping auto-restore for ${sandboxId}: snapshot too large ` +
-        `(${(snapshotSize / (1024 * 1024)).toFixed(1)}MB > ${MAX_AUTO_RESTORE_SIZE / (1024 * 1024)}MB). ` +
-        `Use manual restore from snapshot panel.`
-      );
-      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-      return false;
-    }
-
-    // Use streaming for large snapshots (>25MB) to avoid 32MB RPC limit
-    if (snapshotSize > STREAMING_THRESHOLD) {
-      debug.ide("auto-restore-streaming", sandboxId, { snapshotSize });
-      console.log(`[IDE] Using streaming download for ${sandboxId} (${snapshotSize} bytes)`);
-      await downloadLargeFileFromR2(sandbox, object, SNAPSHOT_TMP_PATH, chatId);
-    } else {
-      // Buffered approach for smaller snapshots
-      const arrayBuffer = await object.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      const CHUNK_SIZE = 32768;
-      let binaryString = "";
-      for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-        const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-        binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-      }
-      const base64Data = btoa(binaryString);
-      await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, { encoding: "base64" });
-    }
-
-    // Extract the snapshot
-    const extractResult = await sandbox.exec(
-      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH} && rm -f ${SNAPSHOT_TMP_PATH}`,
-      { timeout: TAR_TIMEOUT_MS }
-    );
-
-    if (extractResult.exitCode !== 0) {
-      debug.error("auto-restore-extract-failed", {
-        component: "IDE",
-        sandboxId,
-        exitCode: extractResult.exitCode,
-        stderr: extractResult.stderr,
-      });
-      await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-      return false;
-    }
-
-    // Mark as initialized
-    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 });
-    debug.ide("auto-restore-success", sandboxId, { snapshotKey: latestKey, size: snapshotSize });
-    console.log(`[IDE] Auto-restored ${sandboxId} from ${latestKey} (${snapshotSize} bytes)`);
-    return true;
-  } catch (error) {
-    debug.error("auto-restore-error", {
-      component: "IDE",
-      sandboxId,
-      error: String(error),
-    });
-    // Create marker anyway to avoid retry loops
-    await sandbox.exec(`touch ${IDE_INIT_MARKER}`, { timeout: 5000 }).catch(() => {});
-    return false;
-  }
+  return restored;
 }
 
 // Known user ID → friendly name mappings

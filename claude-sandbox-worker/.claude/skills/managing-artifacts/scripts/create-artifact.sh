@@ -64,16 +64,25 @@ if ! jq -e ".artifact_types.${ARTIFACT_TYPE}" "$MENU_FILE" > /dev/null 2>&1; the
     \"folder\": \"${ARTIFACT_TYPE}\",
     \"schema\": {
       \"required\": [\"uuid\", \"type\", \"title\", \"created_at\", \"created_by\", \"status\"],
-      \"optional\": [\"tags\"]
+      \"optional\": [\"tags\", \"notes\"]
     },
     \"vocabularies\": {
       \"tags\": {
         \"description\": \"Flexible tags for categorization\",
         \"values\": {}
+      },
+      \"notes\": {
+        \"description\": \"Free-text notes or additional information\",
+        \"values\": {}
       }
     },
-    \"example_queries\": []
+    \"example_queries\": [
+      \".tags[] == \\\"example-tag\\\"\",
+      \".status == \\\"active\\\"\"
+    ]
   } | .last_updated = \"${TIMESTAMP}\"" "$MENU_FILE" > "${MENU_FILE}.tmp" && mv "${MENU_FILE}.tmp" "$MENU_FILE"
+  echo "NOTE: Created new artifact type '${ARTIFACT_TYPE}' in MENU.JSON"
+  echo "      Consider adding more vocabularies with add-vocabulary.sh"
 fi
 
 # Create file path (use first 8 chars of UUID in filename)

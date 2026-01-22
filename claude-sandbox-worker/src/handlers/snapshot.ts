@@ -8,22 +8,61 @@
  */
 
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   CORS_HEADERS,
+  Env,
   HandlerContext,
   SnapshotRequest,
   getSnapshotKey,
   getSnapshotPrefix,
 } from "../types";
-import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import {
+  SANDBOX_SLEEP_AFTER,
+  SNAPSHOT_DIRS,
+  SNAPSHOT_TMP_PATH,
+  SNAPSHOT_CURL_TIMEOUT_MS,
+  TAR_TIMEOUT_MS,
+  buildCreateExcludeFlags,
+  buildRestoreExcludeFlags,
+} from "../../../shared/config";
 import { debug } from "../lib/debug";
 import { clearTerminalUrlCache } from "./ide";
 import {
   getFileSize,
   uploadLargeFileToR2,
-  downloadLargeFileFromR2,
   STREAMING_THRESHOLD,
 } from "../lib/streaming";
+
+/** R2 bucket name for snapshots */
+const SNAPSHOT_BUCKET_NAME = "andee-snapshots";
+
+/**
+ * Generate a presigned URL for downloading a snapshot from R2.
+ * Uses S3-compatible API since R2 Workers API lacks getSignedUrl().
+ */
+async function generatePresignedUrl(
+  env: Env,
+  snapshotKey: string,
+  expiresInSeconds: number = 300
+): Promise<string> {
+  const s3Client = new S3Client({
+    region: "auto",
+    endpoint: `https://${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY!,
+    },
+  });
+
+  const command = new GetObjectCommand({
+    Bucket: SNAPSHOT_BUCKET_NAME,
+    Key: snapshotKey,
+  });
+
+  return getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
+}
 
 /**
  * Ensures the sandbox is healthy and ready to execute commands.
@@ -82,24 +121,6 @@ async function ensureSandboxHealthy(sandbox: Sandbox, chatId?: string): Promise<
   return false;
 }
 
-// Snapshot configuration
-const SNAPSHOT_DIRS = ["/workspace", "/home/claude"];
-const SNAPSHOT_TMP_PATH = "/tmp/snapshot.tar.gz";
-const TAR_TIMEOUT_MS = 60_000; // 60 seconds for tar operations
-
-// Directories to exclude from snapshots
-// /media is R2-mounted and persisted separately - don't include in snapshots
-// Legacy memvid paths excluded since conversation history now lives in R2
-const SNAPSHOT_EXCLUDES: string[] = [
-  "/media",
-  "/media/*",
-  "/home/claude/.memvid",       // Legacy embedding models location (~133MB)
-  "/home/claude/shared/*.mv2",  // Legacy shared conversation memory
-  "/home/claude/private",       // Legacy private user memory directories
-];
-const TAR_EXCLUDE_FLAGS = SNAPSHOT_EXCLUDES.length > 0
-  ? SNAPSHOT_EXCLUDES.map(e => `--exclude='${e}'`).join(" ")
-  : "";
 
 /**
  * POST /snapshot - Create a snapshot of the sandbox filesystem.
@@ -147,7 +168,8 @@ export async function handleSnapshotCreate(
     }
 
     // Create tar archive (excluding large caches like .memvid models)
-    const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${TAR_EXCLUDE_FLAGS} ${dirsToBackup.join(" ")} 2>/dev/null`;
+    const createExcludes = buildCreateExcludeFlags();
+    const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${createExcludes} ${dirsToBackup.join(" ")} 2>/dev/null`;
     console.log(`[Snapshot] Running: ${tarCmd}`);
 
     const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
@@ -434,11 +456,13 @@ export async function handleSnapshotRestore(
       sleepAfter: SANDBOX_SLEEP_AFTER,
     });
 
-    // Step 1: Download snapshot from R2 first (doesn't need sandbox)
-    debug.snapshot('r2-download-start', chatId, { snapshotKey });
-    const object = await ctx.env.SNAPSHOTS.get(snapshotKey);
+    // Step 1: Check snapshot exists using head() - no Worker memory usage
+    // IMPORTANT: We use head() instead of get().arrayBuffer() to avoid loading
+    // large snapshots into Worker memory, which would cause crashes on >10MB files.
+    debug.snapshot('r2-head-start', chatId, { snapshotKey });
+    const headResult = await ctx.env.SNAPSHOTS.head(snapshotKey);
 
-    if (!object) {
+    if (!headResult) {
       debug.error('r2-not-found', { component: 'Snapshot', chatId, snapshotKey });
       return Response.json(
         { error: "Snapshot not found in R2", snapshotKey },
@@ -446,8 +470,8 @@ export async function handleSnapshotRestore(
       );
     }
 
-    const arrayBuffer = await object.arrayBuffer();
-    debug.snapshot('r2-download-complete', chatId, { size: arrayBuffer.byteLength });
+    const snapshotSize = headResult.size;
+    debug.snapshot('r2-head-complete', chatId, { size: snapshotSize });
 
     // Step 2: Wake up the sandbox with a health check
     debug.snapshot('health-check-start', chatId, {});
@@ -467,47 +491,45 @@ export async function handleSnapshotRestore(
       );
     }
 
-    // Step 3: Write snapshot to container
-    // Use streaming download for large files, buffered for small files
-    const snapshotSize = arrayBuffer.byteLength;
+    // Step 3: Download snapshot to container using presigned URL
+    // Container downloads directly from R2, bypassing Worker memory limits
     debug.snapshot('write-snapshot-start', chatId, { size: snapshotSize });
 
+    // Check if R2 credentials are available for presigned URLs
+    if (!ctx.env.AWS_ACCESS_KEY_ID || !ctx.env.AWS_SECRET_ACCESS_KEY || !ctx.env.CLOUDFLARE_ACCOUNT_ID) {
+      debug.error('r2-credentials-missing', { component: 'Snapshot', chatId });
+      return Response.json(
+        { error: "R2 credentials not configured for presigned URL download" },
+        { status: 500, headers: CORS_HEADERS }
+      );
+    }
+
     try {
-      if (snapshotSize > STREAMING_THRESHOLD) {
-        // Large file: use streaming download (chunked writes)
-        debug.snapshot('write-snapshot-streaming', chatId, { size: snapshotSize });
+      // Generate presigned URL (5 minute expiry)
+      const presignedUrl = await generatePresignedUrl(ctx.env, snapshotKey, 300);
+      debug.snapshot('presigned-url-generated', chatId, {});
 
-        // Re-fetch the object to get a fresh body stream
-        // (we already consumed arrayBuffer above for small file compatibility)
-        const freshObject = await ctx.env.SNAPSHOTS.get(snapshotKey);
-        if (!freshObject) {
-          throw new Error("Snapshot disappeared during restore");
-        }
+      // Write URL to temp file to avoid shell interpolation issues
+      const urlTmpFile = "/tmp/snapshot-url.txt";
+      await sandbox.writeFile(urlTmpFile, presignedUrl);
 
-        await downloadLargeFileFromR2(sandbox, freshObject, SNAPSHOT_TMP_PATH, chatId);
-        debug.snapshot('write-snapshot-streaming-success', chatId, {});
+      // Container downloads directly via curl
+      const curlTimeoutSeconds = Math.ceil(SNAPSHOT_CURL_TIMEOUT_MS / 1000);
+      const tmpPath = `${SNAPSHOT_TMP_PATH}.tmp`;
+      const curlResult = await sandbox.exec(
+        `curl --fail --silent --show-error --location --retry 3 --retry-delay 1 --max-time ${curlTimeoutSeconds} "$(cat ${urlTmpFile})" -o ${tmpPath} && mv ${tmpPath} ${SNAPSHOT_TMP_PATH}`,
+        { timeout: SNAPSHOT_CURL_TIMEOUT_MS + 30000 }
+      );
 
-      } else {
-        // Small file: use buffered write (existing approach)
-        debug.snapshot('write-snapshot-buffered', chatId, { size: snapshotSize });
+      // Clean up URL file immediately (contains auth signature)
+      await sandbox.exec(`rm -f ${urlTmpFile}`, { timeout: 5000 });
 
-        // Convert ArrayBuffer to base64 in chunks to avoid stack overflow
-        // (spreading large arrays as function arguments causes "Maximum call stack size exceeded")
-        const bytes = new Uint8Array(arrayBuffer);
-        const CHUNK_SIZE = 32768; // 32KB chunks
-        let binaryString = '';
-        for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-          const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-          binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-        }
-        const base64Data = btoa(binaryString);
-        debug.snapshot('base64-encoded', chatId, { base64Length: base64Data.length });
-
-        await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
-          encoding: "base64",
-        });
-        debug.snapshot('write-snapshot-buffered-success', chatId, {});
+      if (curlResult.exitCode !== 0) {
+        throw new Error(`Curl download failed: ${curlResult.stderr}`);
       }
+
+      debug.snapshot('curl-download-success', chatId, { size: snapshotSize });
+
     } catch (writeError) {
       debug.error('write-snapshot-failed', {
         component: 'Snapshot',
@@ -516,16 +538,19 @@ export async function handleSnapshotRestore(
         errorType: (writeError as Error).constructor?.name,
       });
       return Response.json(
-        { error: "Failed to write snapshot to container", detail: String(writeError) },
+        { error: "Failed to download snapshot to container", detail: String(writeError) },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
-    // Step 4: Clear directories and extract in sequence
+    // Step 4: Extract snapshot (excluding system files that come from Dockerfile)
+    // NOTE: We don't clear directories first because:
+    // 1. tar will overwrite existing files anyway
+    // 2. Clearing would delete system files (.claude, .bashrc) that aren't in the snapshot
     debug.snapshot('extract-start', chatId, { dirs: SNAPSHOT_DIRS });
-    const clearCmd = SNAPSHOT_DIRS.map(dir => `rm -rf ${dir}/* ${dir}/.[!.]* 2>/dev/null`).join("; ");
+    const restoreExcludes = buildRestoreExcludeFlags();
     const restoreResult = await sandbox.exec(
-      `${clearCmd}; cd / && tar -xzf ${SNAPSHOT_TMP_PATH} && rm -f ${SNAPSHOT_TMP_PATH}`,
+      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH} ${restoreExcludes} && rm -f ${SNAPSHOT_TMP_PATH}`,
       { timeout: TAR_TIMEOUT_MS }
     );
     debug.snapshot('extract-complete', chatId, {
@@ -571,12 +596,18 @@ export async function handleSnapshotRestore(
     if (markAsLatest) {
       debug.snapshot('mark-latest-start', chatId, {});
       try {
-        // Simply copy the restored snapshot to the "latest" key in R2
-        // This is much more reliable than re-creating a tar from the container
+        // Copy the restored snapshot to the "latest" key in R2
+        // Stream directly from source to destination - no Worker memory usage
         newSnapshotKey = getSnapshotKey(chatId, senderId, isGroup);
 
-        // Use the already-downloaded arrayBuffer (we still have it from Step 2)
-        await ctx.env.SNAPSHOTS.put(newSnapshotKey, arrayBuffer, {
+        // Fetch the source object body as a stream (not arrayBuffer!)
+        const sourceObject = await ctx.env.SNAPSHOTS.get(snapshotKey);
+        if (!sourceObject?.body) {
+          throw new Error("Failed to get snapshot body for copy");
+        }
+
+        // Stream body directly to the new key
+        await ctx.env.SNAPSHOTS.put(newSnapshotKey, sourceObject.body, {
           customMetadata: {
             chatId,
             senderId: senderId || "",
@@ -584,7 +615,7 @@ export async function handleSnapshotRestore(
             createdAt: new Date().toISOString(),
             reason: "restore-mark-latest",
             restoredFrom: snapshotKey,
-            copiedFromTimestamp: object.uploaded?.toISOString() || "unknown",
+            copiedFromTimestamp: headResult.uploaded?.toISOString() || "unknown",
           },
         });
 

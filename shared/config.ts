@@ -113,3 +113,27 @@ export const ALLOWED_TOOLS = [
 ] as const;
 
 export type AllowedTool = (typeof ALLOWED_TOOLS)[number];
+
+// ============================================================================
+// Snapshot Configuration (re-exported from config/snapshot.ts)
+// ============================================================================
+
+export {
+  SNAPSHOT_DIRS,
+  SNAPSHOT_TMP_PATH,
+  TAR_TIMEOUT_MS,
+  SNAPSHOT_CREATE_EXCLUDES,
+  SNAPSHOT_RESTORE_EXCLUDES,
+  buildCreateExcludeFlags,
+  buildRestoreExcludeFlags,
+} from "./config/snapshot";
+
+// ============================================================================
+// Presigned URL Snapshot Restore
+// ============================================================================
+
+/**
+ * Timeout for curl download of large snapshots (5 minutes).
+ * Container downloads directly from R2 via presigned URL.
+ */
+export const SNAPSHOT_CURL_TIMEOUT_MS = 5 * 60 * 1000; // 300 seconds

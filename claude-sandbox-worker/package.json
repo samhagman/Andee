@@ -20,6 +20,8 @@
   "description": "",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.972.0",
+    "@aws-sdk/s3-request-presigner": "^3.972.0",
     "@cloudflare/sandbox": "^0.6.7",
     "cron-parser": "^4.9.0",
     "yaml": "^2.8.2"
