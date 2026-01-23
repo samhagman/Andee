@@ -270,7 +270,7 @@ The Agent SDK has these tools enabled inside the container:
 
 ## File Locations
 
-Paths inside the container:
+### Container Paths
 
 | Path | Purpose |
 |------|---------|
@@ -282,6 +282,22 @@ Paths inside the container:
 | `/workspace/telegram_agent.log` | Agent logs (view via `/logs` endpoint) |
 
 **Important:** Port 3000 is reserved by Cloudflare Sandbox. Use port 8080 for internal services.
+
+### Shared Utility Modules
+
+Reusable utilities in the monorepo:
+
+| Path | Purpose |
+|------|---------|
+| `shared/lib/shell.ts` | Shell escaping (`shQuote`) for safe command execution |
+| `shared/lib/validation.ts` | Query parameter parsing (`parseIsGroup`, `requireIsGroup`) and `ValidationError` |
+| `claude-sandbox-worker/src/lib/file-utils.ts` | Binary file detection (`isBinaryFile`), base64 encoding (`uint8ArrayToBase64`) |
+| `claude-sandbox-worker/src/lib/snapshot-operations.ts` | Unified snapshot operations (create, restore, preview caching) |
+
+**Usage guidelines:**
+- Use `shQuote()` when building shell commands with user input to prevent injection
+- Use `isBinaryFile()` before reading files to determine appropriate encoding
+- Use snapshot operations from `snapshot-operations.ts` instead of inline R2/tar logic
 
 ---
 

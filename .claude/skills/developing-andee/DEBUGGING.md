@@ -126,11 +126,54 @@ cd claude-sandbox-worker && npx wrangler tail --format pretty
 # ProcessExitedBeforeReadyError: Process exited with code 0/1 before becoming ready
 
 # 4. Restart sandbox to clear stale state:
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restart" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"YOUR_CHAT_ID","senderId":"YOUR_SENDER_ID","isGroup":false}'
 ```
+
+### Terminal URL Persistence (R2 Caching)
+
+Terminal WebSocket URLs are cached in R2 to survive Worker isolate restarts:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  TERMINAL URL CACHING ARCHITECTURE                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Problem: Cloudflare Workers are stateless. Different Workers calling   │
+│  exposePort() generate different URL tokens, breaking existing WS.      │
+│                                                                         │
+│  Solution: 3-tier caching with R2 persistence                           │
+│                                                                         │
+│  ┌─ TIER 1: R2 Storage ──────────────────── Survives Worker restarts ✓ │
+│  │  Key: terminal-urls/{sandboxId}.json                                │
+│  │  TTL: 55 minutes (5-min safety margin before sandbox sleep)         │
+│  │                                                                      │
+│  ├─ TIER 2: In-memory cache ────────────── Fast for same Worker        │
+│  │                                                                      │
+│  └─ TIER 3: exposePort() ───────────────── Generate new if needed      │
+│                                                                         │
+│  Cache invalidation:                                                    │
+│  • /restart endpoint calls clearTerminalUrl()                           │
+│  • /factory-reset endpoint calls clearTerminalUrl()                     │
+│  • TTL expiration (55 minutes)                                          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Verifying R2 cache is working:**
+
+Look for these log messages in `wrangler tail`:
+```
+✓ [IDE] Using R2-stored terminal URL for chat-123: wss://8081-chat-123-xxx.samhagman.com/
+✗ [IDE] Exposing port 8081... (means cache miss - expected on first connect)
+```
+
+**If terminal keeps reconnecting:**
+1. Check if logs show `Using R2-stored terminal URL` (cache hit) vs `Exposing port` (cache miss)
+2. If always cache miss, R2 storage may have an issue
+3. Restart sandbox to clear all state: `/restart` endpoint
 
 ---
 
@@ -168,7 +211,7 @@ The persistent server writes timestamped logs to `/workspace/telegram_agent.log`
 
 ```bash
 # Get logs for a specific chat
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHAT_ID" | jq -r '.log'
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/logs?chatId=CHAT_ID" | jq -r '.log'
 ```
 
 ### Example Log Output
@@ -245,27 +288,27 @@ Inside the container:
 
 ```bash
 # List all sessions for a chat
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Get the latest transcript (newest first)
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Get just the thinking blocks (most useful for debugging)
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Get just the tool calls
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Pagination - get last 3 entries
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Page 2 (skip first 3)
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3&offset=3" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&limit=3&offset=3" \
   -H "X-API-Key: $ANDEE_API_KEY"
 ```
 
@@ -327,11 +370,11 @@ When image processing is slow, check what tools Claude called:
 
 ```bash
 # Via API - quick tool list
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&toolsOnly=true" \
   -H "X-API-Key: $ANDEE_API_KEY" | jq '.tools[] | .name'
 
 # Via API - what was Claude thinking?
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/transcripts?chatId=CHAT_ID&latest=true&thinkingOnly=true" \
   -H "X-API-Key: $ANDEE_API_KEY" | jq '.thinking[] | .thinking'
 ```
 
@@ -363,7 +406,7 @@ If you see `analyzing-media` skill being invoked when it shouldn't be (Claude ha
 ## Diagnostics
 
 ```bash
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/diag" | jq .
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/diag" | jq .
 ```
 
 ---
@@ -373,7 +416,7 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/diag" | jq .
 Creates a snapshot of the current state, then destroys the container and clears the R2 session:
 
 ```bash
-curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/reset" \
+curl -s -X POST "https://claude-sandbox-worker.h2c.workers.dev/reset" \
   -H "Content-Type: application/json" \
   -d '{"chatId":"CHAT_ID"}'
 # Returns: { success: true, snapshotKey: "snapshots/CHAT_ID/..." }
@@ -402,19 +445,36 @@ npx wrangler r2 object delete andee-sessions/sessions/CHAT_ID.json --remote
 
 Snapshots backup `/workspace` and `/home/claude` directories to R2.
 
+### Unified Snapshot Module
+
+All snapshot operations are centralized in `claude-sandbox-worker/src/lib/snapshot-operations.ts`:
+
+| Function | Purpose |
+|----------|---------|
+| `restoreSnapshot()` | Download from R2 via presigned URL, extract to container |
+| `cacheSnapshotForPreview()` | Download snapshot for IDE preview (browsing without restore) |
+| `createAndUploadSnapshot()` | Create tar, upload (streaming for >25MB) |
+| `destroyContainerWithCleanup()` | Destroy container + clear terminal URL cache |
+
+**Key benefits of the unified module:**
+- **Presigned URL downloads:** No size limits (bypasses Worker memory limits)
+- **Streaming uploads:** Large snapshots (>25MB) use multipart upload
+- **Shell injection protection:** All shell commands use `shQuote()` from `shared/lib/shell.ts`
+- **Consistent behavior:** All endpoints (`/ask`, `/restore`, IDE `/files`) use the same code path
+
 ### API Endpoints
 
 ```bash
 # Create manual snapshot
-curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot" \
+curl -s -X POST "https://claude-sandbox-worker.h2c.workers.dev/snapshot" \
   -H "Content-Type: application/json" \
   -d '{"chatId":"CHAT_ID"}'
 
 # List snapshots for a chat
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshots?chatId=CHAT_ID"
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/snapshots?chatId=CHAT_ID"
 
 # Get latest snapshot (returns tar.gz)
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshot?chatId=CHAT_ID" -o snapshot.tar.gz
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/snapshot?chatId=CHAT_ID" -o snapshot.tar.gz
 ```
 
 ### Snapshot Immutability Policy
@@ -464,7 +524,7 @@ npx wrangler r2 object get andee-snapshots/snapshots/CHAT_ID/2024-01-05T12:00:00
 - Restore happens in both `/ask` endpoint (Telegram messages) and `/files` endpoint (IDE)
 - The latest snapshot (by timestamp) is always used
 - IDE uses marker file `/tmp/.ide-initialized` to track if auto-restore already happened
-- **No size limits**: Both endpoints use presigned URL + curl, supporting snapshots of any size
+- **No size limits**: All endpoints use `restoreSnapshot()` from the unified module, which downloads via presigned URL + curl directly in the container
 
 ### IDE Snapshot Management
 
@@ -477,16 +537,18 @@ The Sandbox IDE supports creating, browsing, and restoring snapshots via the �
 │                                                                         │
 │  📸 Take: Create a new snapshot immediately                             │
 │     - Button in dropdown header next to × close button                  │
-│     - Backs up /workspace and /home/claude to R2                        │
-│     - Shows loading state ("Taking...") during creation                 │
+│     - Uses createAndUploadSnapshot() from unified module                │
+│     - Auto-selects streaming upload for large snapshots (>25MB)         │
 │     - New snapshot appears at top of list with LATEST badge             │
 │                                                                         │
 │  👁 Preview: Browse snapshot without restoring                          │
-│     - Downloads tar to /tmp, lists with tar -tzf                        │
+│     - Uses cacheSnapshotForPreview() from unified module                │
+│     - Downloads via presigned URL to /tmp cache directory               │
 │     - Navigate directories, view file contents                          │
-│     - Useful for checking "what's in this old snapshot?"                │
+│     - NO size limits (container downloads directly from R2)             │
 │                                                                         │
 │  ↩ Restore: Replace container files with snapshot                       │
+│     - Uses restoreSnapshot() from unified module                        │
 │     1. Generate presigned URL for R2 snapshot                           │
 │     2. Container curls directly from R2 (bypasses Worker limits)        │
 │     3. Extract tar.gz excluding system files (.claude/skills, etc.)     │
@@ -494,9 +556,13 @@ The Sandbox IDE supports creating, browsing, and restoring snapshots via the �
 │     5. Session may become stale → click "Restart Sandbox"               │
 │                                                                         │
 │  Auto-restore on IDE access:                                            │
-│     - `maybeAutoRestore()` in ide.ts checks /tmp/.ide-initialized       │
-│     - If missing, calls `restoreFromSnapshot()` from container-startup  │
-│     - Uses same presigned URL approach - NO size limits                 │
+│     - maybeAutoRestore() checks /tmp/.ide-initialized marker            │
+│     - If missing, calls restoreSnapshot() from unified module           │
+│     - NO size limits (all operations use presigned URL approach)        │
+│                                                                         │
+│  Shell Command Security:                                                │
+│     - All shell commands use shQuote() for injection prevention         │
+│     - Located in shared/lib/shell.ts                                    │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -506,10 +572,12 @@ The Sandbox IDE supports creating, browsing, and restoring snapshots via the �
 | Issue | Symptom | Solution |
 |-------|---------|----------|
 | Session stale after restore | `Unknown Error, TODO` when browsing files | Click "Restart Sandbox" - fresh container will auto-restore from R2 |
-| Files lost after restart | Files were there, now gone | Fixed (2026-01-22). IDE `maybeAutoRestore()` now uses `restoreFromSnapshot()` with presigned URLs - no size limits |
-| markAsLatest failed | Response shows `markAsLatestError` | markAsLatest now copies original snapshot to R2 instead of re-tarring (avoids session staleness) |
+| Files lost after restart | Files were there, now gone | **RESOLVED**: All endpoints now use unified `restoreSnapshot()` with presigned URLs |
+| markAsLatest failed | Response shows `markAsLatestError` | markAsLatest now copies original snapshot to R2 instead of re-tarring |
+| Large snapshot timeout | Upload fails for >25MB | **RESOLVED**: Unified module auto-selects streaming multipart upload |
+| Stack overflow on large restore | Worker crashes on download | **RESOLVED**: Container downloads directly via presigned URL (no Worker memory) |
 
-**Note**: Large snapshot issues (stack overflow, 10MB limits) have been resolved. Both `/ask` and `/files` endpoints now use `restoreFromSnapshot()` from `container-startup.ts`, which downloads snapshots via presigned URL + curl directly in the container, bypassing all Worker memory/RPC limits.
+**Note**: Large snapshot issues have been resolved by consolidating all operations into `claude-sandbox-worker/src/lib/snapshot-operations.ts`. Both `/ask` and IDE `/files` endpoints use the same `restoreSnapshot()` function, which downloads via presigned URL + curl directly in the container, bypassing all Worker memory/RPC limits. Uploads >25MB automatically use streaming multipart upload.
 
 ### Restore Endpoints
 
@@ -530,10 +598,10 @@ curl -X POST "https://claude-sandbox-worker.../restore" \
 
 ```bash
 # Health check
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/"
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/"
 
 # Test /ask endpoint (persistent server, fire-and-forget)
-curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/ask" \
+curl -s -X POST "https://claude-sandbox-worker.h2c.workers.dev/ask" \
   -H "Content-Type: application/json" \
   -d '{"chatId":"test","message":"hello","botToken":"fake-token","claudeSessionId":null,"userMessageId":1}'
 
@@ -606,13 +674,13 @@ curl -s -X POST ".../ask" -d '{"chatId":"perf-test","message":"test","botToken":
 **Manual Solution (if auto-recovery fails):**
 ```bash
 # Reset the sandbox (clears container + R2 session)
-curl -s -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/reset" \
+curl -s -X POST "https://claude-sandbox-worker.h2c.workers.dev/reset" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"CHAT_ID","senderId":"SENDER_ID","isGroup":false}'
 
 # Check logs for details
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHAT_ID" \
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/logs?chatId=CHAT_ID" \
   -H "X-API-Key: $ANDEE_API_KEY" | jq -r '.log'
 ```
 
@@ -626,7 +694,7 @@ curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHA
 **Diagnosis:**
 ```bash
 # Check agent logs
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/logs?chatId=CHAT_ID" | jq -r '.log'
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/logs?chatId=CHAT_ID" | jq -r '.log'
 
 # If "No log file found" - agent didn't start, check worker logs
 npx wrangler tail --format pretty
@@ -660,6 +728,26 @@ Then deploy and reset sandboxes.
 **Cause:** Port 3000 is reserved by Cloudflare Sandbox infrastructure (internal Bun server).
 
 **Solution:** Use port 8080 for the persistent HTTP server instead. This is already configured correctly.
+
+### Issue: IDE terminal keeps cycling (connect → disconnect → reconnect)
+
+**Cause (FIXED):** This was caused by async WebSocket event handlers using stale `sandboxId` references after switching sandboxes. When switching from sandbox A to B:
+1. `this.sandboxId = "B"` changed first
+2. Old WebSocket A closed
+3. A's `onclose` fired asynchronously, deleted cache for `this.sandboxId` (now "B"!)
+4. New connection to B had no cache, fetched fresh URL
+5. Cycle repeated
+
+**Solution (Implemented Jan 2026):** Terminal.ts now captures `sandboxId` in closure at start of `doConnect()`. Event handlers check if sandbox changed and ignore stale events.
+
+**If still happening:** Check worker logs for:
+```
+✓ [IDE] Using R2-stored terminal URL for...  (working - cache hit)
+✗ [IDE] Exposing port 8081...               (working - first connect)
+✗ [IDE] getExposedPorts() didn't return URL (BAD - triggers unexpose/re-expose)
+```
+
+If you see "getExposedPorts() didn't return URL", the SDK may be misbehaving. Restart sandbox to clear state.
 
 ### Issue: "ProcessExitedBeforeReadyError: Process exited with code 1"
 
@@ -735,32 +823,19 @@ grep "sleepAfter" claude-sandbox-worker/src/index.ts  # Should be "1h"
 
 ### Issue: IDE snapshot restore loses files after restart
 
+**Status:** RESOLVED by unified snapshot module.
+
 **Cause:** Before the fix, fresh containers didn't auto-restore from R2. The restore extracted files, but when you clicked "Restart Sandbox" to fix the stale session, the fresh container started empty.
 
-**Solution (now automatic):** `handleFiles()` in ide.ts now checks for `/tmp/.ide-initialized` marker. If missing, it auto-restores from the latest R2 snapshot before listing files.
-
-**If files are still missing after restore:**
-1. Check network requests - did `markAsLatest` succeed? (look for `newSnapshotKey` in response)
-2. If `markAsLatestError` is present, the snapshot wasn't copied to R2 as latest
-3. Try restoring again with fresh browser (clear any cached state)
+**Solution (now automatic):** All IDE operations now use `restoreSnapshot()` from `snapshot-operations.ts`. The `/tmp/.ide-initialized` marker tracks if auto-restore already happened, ensuring files are always present after restart.
 
 ### Issue: "Maximum call stack size exceeded" on large snapshots
 
-**Cause:** Using spread operator on large Uint8Array: `btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))`. JavaScript function arguments have a limit (~32KB-65KB depending on engine).
+**Status:** RESOLVED by unified snapshot module.
 
-**Solution:** Build binary string in chunks, then btoa once:
-```typescript
-const bytes = new Uint8Array(arrayBuffer);
-const CHUNK_SIZE = 32768; // 32KB
-let binaryString = '';
-for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-  const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-  binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-}
-const base64Data = btoa(binaryString);
-```
+**Cause:** Was using spread operator on large Uint8Array: `btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))`. JavaScript function arguments have a limit (~32KB-65KB depending on engine).
 
-**Affected files:** `snapshot.ts`, `snapshot-preview.ts`, `ide.ts` (all now fixed)
+**Solution:** The unified `snapshot-operations.ts` module eliminates this entirely by using presigned URLs - the container downloads snapshots directly from R2 via curl, bypassing all Worker memory limits. No base64 encoding is needed.
 
 ### Issue: Voice message returns empty transcription
 

@@ -1,5 +1,7 @@
 # Snapshot Restore Fix - Handoff Document v2
 
+> **SUPERSEDED (2026-01-22)**: This document describes the OLD snapshot implementation with multiple scattered handlers and patterns. The patterns documented here have been consolidated into a unified module: `claude-sandbox-worker/src/lib/snapshot-operations.ts`. See `/developing-andee` skill (DEBUGGING.md section) for current snapshot documentation. This document is retained for historical reference to understand past design decisions.
+
 **Date**: 2026-01-12
 **Status**: Core fix deployed to production, one follow-up issue identified
 **Test User**: TEST_USER_1 (999999999)
@@ -162,7 +164,7 @@ return Response.json(
 
 ### Production Testing (2026-01-12)
 
-**Deployment**: Successfully deployed to `https://claude-sandbox-worker.samuel-hagman.workers.dev`
+**Deployment**: Successfully deployed to `https://claude-sandbox-worker.h2c.workers.dev`
 
 | Test | Description | Result |
 |------|-------------|--------|
@@ -175,23 +177,23 @@ return Response.json(
 
 ```bash
 # Restart sandbox (clears stale session)
-curl -X POST https://claude-sandbox-worker.samuel-hagman.workers.dev/restart \
+curl -X POST https://claude-sandbox-worker.h2c.workers.dev/restart \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'
 
 # Restore snapshot
-curl -X POST https://claude-sandbox-worker.samuel-hagman.workers.dev/restore \
+curl -X POST https://claude-sandbox-worker.h2c.workers.dev/restore \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $ANDEE_API_KEY" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"snapshotKey":"snapshots/999999999/999999999/2026-01-11T16-05-13-494Z.tar.gz","markAsLatest":false}'
 
 # List snapshots
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshots?chatId=999999999&senderId=999999999&isGroup=false" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/snapshots?chatId=999999999&senderId=999999999&isGroup=false" \
   -H "X-API-Key: $ANDEE_API_KEY"
 
 # Check files after restore
-curl "https://claude-sandbox-worker.samuel-hagman.workers.dev/files?sandbox=chat-999999999&path=/home/claude" \
+curl "https://claude-sandbox-worker.h2c.workers.dev/files?sandbox=chat-999999999&path=/home/claude" \
   -H "X-API-Key: $ANDEE_API_KEY"
 ```
 
@@ -280,7 +282,7 @@ Users can click the sandbox dropdown and re-select their sandbox, which triggers
 
 | Component | Status | URL |
 |-----------|--------|-----|
-| Sandbox Worker | ✅ Deployed | https://claude-sandbox-worker.samuel-hagman.workers.dev |
+| Sandbox Worker | ✅ Deployed | https://claude-sandbox-worker.h2c.workers.dev |
 | Sandbox IDE | ✅ Deployed | https://andee-ide.pages.dev |
 
 ---
@@ -338,7 +340,7 @@ M sandbox-ide/src/components/SnapshotPanel.ts     ← UI components
 │  • API Key: adk_8dfeed669475a5661b976ff13249c20c                        │
 │  • Test User: 999999999 (TEST_USER_1)                                   │
 │  • Production IDE: https://andee-ide.pages.dev                          │
-│  • Production Worker: https://claude-sandbox-worker.samuel-hagman.workers.dev │
+│  • Production Worker: https://claude-sandbox-worker.h2c.workers.dev │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```

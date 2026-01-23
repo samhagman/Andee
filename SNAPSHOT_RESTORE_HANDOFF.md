@@ -1,5 +1,7 @@
 # Snapshot Restore UI - E2E Test Handoff Document
 
+> **SUPERSEDED (2026-01-22)**: This document describes the OLD snapshot implementation with multiple scattered handlers and patterns. The patterns documented here have been consolidated into a unified module: `claude-sandbox-worker/src/lib/snapshot-operations.ts`. See `/developing-andee` skill (DEBUGGING.md section) for current snapshot documentation. This document is retained for historical reference to understand past design decisions.
+
 **Created**: 2026-01-12T16:20:00Z
 **Author**: Claude Code (Opus 4.5)
 **Status**: UI Testing Complete, Backend Bug Found

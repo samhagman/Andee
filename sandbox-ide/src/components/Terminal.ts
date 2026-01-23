@@ -95,6 +95,11 @@ export class Terminal {
   private async doConnect(): Promise<void> {
     if (!this.sandboxId) return;
 
+    // IMPORTANT: Capture sandboxId in closure for async event handlers
+    // This prevents the bug where switching sandboxes causes old WebSocket's
+    // error/close handlers to delete the WRONG sandbox's cache
+    const currentSandboxId = this.sandboxId;
+
     // Close existing connection
     if (this.ws) {
       this.ws.close();
@@ -102,13 +107,13 @@ export class Terminal {
     }
 
     this.onStatusChange("connecting");
-    this.term.writeln(`\x1b[90m[Connecting to ${this.sandboxId}...]\x1b[0m`);
+    this.term.writeln(`\x1b[90m[Connecting to ${currentSandboxId}...]\x1b[0m`);
 
     try {
       let wsUrl: string;
-      
+
       // Check cache first - use cached URL for reconnects to avoid killing existing port exposures
-      const cachedUrl = this.cachedWsUrls.get(this.sandboxId);
+      const cachedUrl = this.cachedWsUrls.get(currentSandboxId);
       if (cachedUrl && this.reconnectAttempts > 0) {
         // Use cached URL for reconnects
         console.log("[Terminal] Using cached URL for reconnect:", cachedUrl);
@@ -118,38 +123,41 @@ export class Terminal {
         // Fetch fresh URL for initial connection
         const baseUrl = workerUrl();
         const apiKey = getApiKey();
-        const params = new URLSearchParams({ sandbox: this.sandboxId });
+        const params = new URLSearchParams({ sandbox: currentSandboxId });
         const infoUrl = `${baseUrl}/terminal-url?${params}`;
 
         console.log("[Terminal] Getting terminal URL from:", infoUrl);
         this.term.writeln(`\x1b[90m[Getting terminal URL...]\x1b[0m`);
-        
+
         const response = await fetch(infoUrl, {
           headers: { "X-API-Key": apiKey },
         });
-        
+
         if (!response.ok) {
           const errorData = await response.json() as { error?: string };
           throw new Error(errorData.error || `HTTP ${response.status}`);
         }
-        
+
         const data = await response.json() as { success?: boolean; wsUrl?: string; error?: string };
-        
+
         if (!data.success || !data.wsUrl) {
           throw new Error(data.error || "Failed to get terminal URL");
         }
-        
+
         wsUrl = data.wsUrl;
         // Cache the URL for future reconnects
-        this.cachedWsUrls.set(this.sandboxId, wsUrl);
+        this.cachedWsUrls.set(currentSandboxId, wsUrl);
       }
-      
+
       console.log("[Terminal] Connecting to exposed URL:", wsUrl);
       this.term.writeln(`\x1b[90m[Connecting to ${wsUrl}...]\x1b[0m`);
 
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
+        // Only process if this is still the current sandbox
+        if (this.sandboxId !== currentSandboxId) return;
+
         this.onStatusChange("connected");
         this.reconnectAttempts = 0;
         this.term.writeln("\x1b[32m[Connected]\x1b[0m");
@@ -163,6 +171,9 @@ export class Terminal {
       };
 
       this.ws.onmessage = (event) => {
+        // Only process if this is still the current sandbox
+        if (this.sandboxId !== currentSandboxId) return;
+
         console.log("[Terminal] Received:", typeof event.data, event.data instanceof ArrayBuffer ? "ArrayBuffer" : event.data?.slice?.(0, 50));
 
         // ttyd protocol: first character is message type (ASCII)
@@ -193,6 +204,13 @@ export class Terminal {
       };
 
       this.ws.onclose = (event) => {
+        // Only process if this is still the current sandbox
+        // This prevents switching sandboxes from causing reconnect loops
+        if (this.sandboxId !== currentSandboxId) {
+          console.log(`[Terminal] Ignoring close event for old sandbox ${currentSandboxId} (current: ${this.sandboxId})`);
+          return;
+        }
+
         this.onStatusChange("disconnected");
         this.term.writeln("");
         this.term.writeln(
@@ -202,7 +220,7 @@ export class Terminal {
         // Attempt reconnect
         if (
           this.reconnectAttempts < this.maxReconnectAttempts &&
-          this.sandboxId
+          this.sandboxId === currentSandboxId
         ) {
           this.reconnectAttempts++;
           this.term.writeln(
@@ -213,21 +231,28 @@ export class Terminal {
             this.reconnectTimer = null;
             this.doConnect();
           }, 2000);
-        } else if (this.sandboxId) {
+        } else if (this.sandboxId === currentSandboxId) {
           // Exhausted reconnect attempts - invalidate cache so next connect gets fresh URL
-          this.cachedWsUrls.delete(this.sandboxId);
+          this.cachedWsUrls.delete(currentSandboxId);
         }
       };
 
       this.ws.onerror = () => {
+        // Only process if this is still the current sandbox
+        if (this.sandboxId !== currentSandboxId) {
+          console.log(`[Terminal] Ignoring error event for old sandbox ${currentSandboxId} (current: ${this.sandboxId})`);
+          return;
+        }
+
         this.onStatusChange("error");
         this.term.writeln("\x1b[31m[Connection error]\x1b[0m");
         // Invalidate cache on error - URL might be stale
-        if (this.sandboxId) {
-          this.cachedWsUrls.delete(this.sandboxId);
-        }
+        this.cachedWsUrls.delete(currentSandboxId);
       };
     } catch (error) {
+      // Only process if this is still the current sandbox
+      if (this.sandboxId !== currentSandboxId) return;
+
       this.onStatusChange("error");
       this.term.writeln(
         `\x1b[31m[Failed to connect: ${error instanceof Error ? error.message : "Unknown error"}]\x1b[0m`

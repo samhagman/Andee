@@ -162,8 +162,8 @@ Average per-message cost with memory: **$0.04-0.09** (higher with tool use)
 
 ## Deployment URLs
 
-- **Sandbox Worker:** https://claude-sandbox-worker.samuel-hagman.workers.dev
-- **Telegram Bot:** https://claude-telegram-bot.samuel-hagman.workers.dev
+- **Sandbox Worker:** https://claude-sandbox-worker.h2c.workers.dev
+- **Telegram Bot:** https://claude-telegram-bot.h2c.workers.dev
 - **Webhook Status:** Confirmed active (pending_update_count: 0)
 
 ---

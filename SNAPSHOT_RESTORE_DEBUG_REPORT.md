@@ -1,5 +1,7 @@
 # Snapshot Restore Debug Report
 
+> **SUPERSEDED (2026-01-22)**: This document describes the OLD snapshot implementation with multiple scattered handlers and patterns. The patterns documented here have been consolidated into a unified module: `claude-sandbox-worker/src/lib/snapshot-operations.ts`. See `/developing-andee` skill (DEBUGGING.md section) for current snapshot documentation. This document is retained for historical reference to understand past design decisions.
+
 **Date**: 2026-01-12  
 **Status**: Issue identified - `ensureSandboxHealthy()` may fail on completely sleeping sandboxes  
 **Test User**: TEST_USER_1 (999999999)
@@ -21,7 +23,7 @@ This occurs even though `ensureSandboxHealthy()` uses `listProcesses()` to wake 
 
 ### Test 1: Restore without restart (FAILED)
 ```bash
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"snapshotKey":"snapshots/999999999/999999999/2026-01-11T16-05-13-494Z.tar.gz","markAsLatest":false}'
@@ -32,7 +34,7 @@ curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
 ### Test 2: Restart then restore (SUCCESS)
 ```bash
 # Step 1: Restart sandbox
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restart" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'
@@ -40,7 +42,7 @@ curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
 # Result: {"success":true,"message":"Container restarted. Session preserved."}
 
 # Step 2: Restore snapshot
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"snapshotKey":"snapshots/999999999/999999999/2026-01-11T16-05-13-494Z.tar.gz","markAsLatest":false}'

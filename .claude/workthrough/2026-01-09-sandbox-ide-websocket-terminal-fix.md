@@ -113,7 +113,7 @@ const wsTerminal = await sandbox.startProcess(
 
 ### Production Testing
 ```
-Terminal connects to: wss://claude-sandbox-worker.samuel-hagman.workers.dev/ws
+Terminal connects to: wss://claude-sandbox-worker.h2c.workers.dev/ws
 Console logs show:
 - [IDE] Terminal status: connected
 - [Terminal] Received: string 0bash: cannot set terminal process group...

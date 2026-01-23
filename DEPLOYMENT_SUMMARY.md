@@ -28,7 +28,7 @@
 ### API Test (Direct curl)
 ```bash
 # Test 1: Restore without restart (retry logic tested)
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"snapshotKey":"snapshots/999999999/999999999/2026-01-11T16-05-13-494Z.tar.gz","markAsLatest":false}'
@@ -37,14 +37,14 @@ curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
 # ✅ Retry logic working - tried 3 times before failing
 
 # Test 2: Restart then restore (success case)
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restart" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'
 
 # Result: {"success":true,"message":"Container restarted. Session preserved."}
 
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d '{"chatId":"999999999","senderId":"999999999","isGroup":false,"snapshotKey":"snapshots/999999999/999999999/2026-01-11T16-05-13-494Z.tar.gz","markAsLatest":false}'

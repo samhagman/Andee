@@ -347,7 +347,7 @@ export async function handleAsk(
 
     // Service bindings use "internal" hostname which isn't resolvable from containers
     // Use production URL when hostname is "internal", otherwise derive from request
-    const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+    const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.h2c.workers.dev";
     const requestUrl = new URL(ctx.request.url);
     const workerUrl = requestUrl.host === "internal"
       ? PRODUCTION_WORKER_URL

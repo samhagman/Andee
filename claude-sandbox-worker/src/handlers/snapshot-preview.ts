@@ -9,10 +9,12 @@ import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import {
   CORS_HEADERS,
   HandlerContext,
-  Env,
   getSnapshotPrefix,
 } from "../types";
 import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import { cacheSnapshotForPreview } from "../lib/snapshot-operations";
+import { shQuote } from "../../../shared/lib/shell";
+import { isBinaryFile } from "../lib/file-utils";
 
 // Preview cache configuration
 const PREVIEW_CACHE_DIR = "/tmp";
@@ -46,61 +48,6 @@ function validateSnapshotAccess(
   } catch {
     return false;
   }
-}
-
-/**
- * Ensure snapshot is cached in container. Downloads from R2 if not present.
- * Cleans up old previews before caching new ones.
- */
-async function ensureSnapshotCached(
-  sandbox: Sandbox,
-  env: Env,
-  snapshotKey: string
-): Promise<string> {
-  const cacheFile = getCacheFilename(snapshotKey);
-
-  // Check if already cached
-  const checkResult = await sandbox.exec(`test -f ${cacheFile} && echo "EXISTS"`, {
-    timeout: 5000,
-  });
-
-  if (checkResult.stdout.includes("EXISTS")) {
-    console.log(`[SnapshotPreview] Using cached snapshot: ${cacheFile}`);
-    return cacheFile;
-  }
-
-  // Clean up old preview files (older than 30 min)
-  console.log(`[SnapshotPreview] Cleaning up old preview files...`);
-  await sandbox.exec(
-    `find ${PREVIEW_CACHE_DIR} -name 'preview-*.tar.gz' -mmin +30 -delete 2>/dev/null || true`,
-    { timeout: 10000 }
-  );
-
-  // Download snapshot from R2
-  console.log(`[SnapshotPreview] Downloading snapshot: ${snapshotKey}`);
-  const object = await env.SNAPSHOTS.get(snapshotKey);
-
-  if (!object) {
-    throw new Error(`Snapshot not found: ${snapshotKey}`);
-  }
-
-  // Convert to base64 for writing to container
-  // Use chunked approach to avoid stack overflow with large files
-  const arrayBuffer = await object.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
-  const CHUNK_SIZE = 32768; // 32KB chunks
-  let binaryString = '';
-  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-    binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-  }
-  const base64Data = btoa(binaryString);
-
-  // Write to container
-  await sandbox.writeFile(cacheFile, base64Data, { encoding: "base64" });
-  console.log(`[SnapshotPreview] Cached snapshot at: ${cacheFile} (${arrayBuffer.byteLength} bytes)`);
-
-  return cacheFile;
 }
 
 /**
@@ -203,8 +150,16 @@ export async function handleSnapshotFiles(ctx: HandlerContext): Promise<Response
       );
     }
 
-    // Validate snapshot access if chatId is provided
-    if (chatId && !validateSnapshotAccess(snapshotKey, chatId, senderId, isGroup)) {
+    // chatId is required for access validation
+    if (!chatId) {
+      return Response.json(
+        { error: "Missing required chatId parameter" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Validate snapshot access
+    if (!validateSnapshotAccess(snapshotKey, chatId, senderId, isGroup)) {
       return Response.json(
         { error: "Access denied to this snapshot" },
         { status: 403, headers: CORS_HEADERS }
@@ -216,7 +171,7 @@ export async function handleSnapshotFiles(ctx: HandlerContext): Promise<Response
     });
 
     // Ensure snapshot is cached
-    const cacheFile = await ensureSnapshotCached(sandbox, ctx.env, snapshotKey);
+    const cacheFile = await cacheSnapshotForPreview(sandbox, ctx.env, snapshotKey, PREVIEW_CACHE_DIR);
 
     // List tar contents
     const listResult = await sandbox.exec(`tar -tzf ${cacheFile}`, {
@@ -267,8 +222,16 @@ export async function handleSnapshotFile(ctx: HandlerContext): Promise<Response>
       );
     }
 
-    // Validate snapshot access if chatId is provided
-    if (chatId && !validateSnapshotAccess(snapshotKey, chatId, senderId, isGroup)) {
+    // chatId is required for access validation
+    if (!chatId) {
+      return Response.json(
+        { error: "Missing required chatId parameter" },
+        { status: 400, headers: CORS_HEADERS }
+      );
+    }
+
+    // Validate snapshot access
+    if (!validateSnapshotAccess(snapshotKey, chatId, senderId, isGroup)) {
       return Response.json(
         { error: "Access denied to this snapshot" },
         { status: 403, headers: CORS_HEADERS }
@@ -280,14 +243,14 @@ export async function handleSnapshotFile(ctx: HandlerContext): Promise<Response>
     });
 
     // Ensure snapshot is cached
-    const cacheFile = await ensureSnapshotCached(sandbox, ctx.env, snapshotKey);
+    const cacheFile = await cacheSnapshotForPreview(sandbox, ctx.env, snapshotKey, PREVIEW_CACHE_DIR);
 
     // Convert path: /workspace/foo → workspace/foo (tar format has no leading slash)
     const tarPath = path.replace(/^\//, "");
 
     // Check if file exists in tar
     const checkResult = await sandbox.exec(
-      `tar -tzf ${cacheFile} | grep -x '${tarPath}' || echo "NOT_FOUND"`,
+      `tar -tzf ${cacheFile} | grep -x ${shQuote(tarPath)} || echo "NOT_FOUND"`,
       { timeout: 10000 }
     );
 
@@ -309,7 +272,7 @@ export async function handleSnapshotFile(ctx: HandlerContext): Promise<Response>
     // Extract file content
     // Note: tar -xzOf extracts to stdout
     const extractResult = await sandbox.exec(
-      `tar -xzOf ${cacheFile} '${tarPath}'`,
+      `tar -xzOf ${cacheFile} ${shQuote(tarPath)}`,
       { timeout: 30000 }
     );
 
@@ -329,7 +292,7 @@ export async function handleSnapshotFile(ctx: HandlerContext): Promise<Response>
     if (isBinary) {
       // Re-extract with base64 encoding
       const base64Result = await sandbox.exec(
-        `tar -xzOf ${cacheFile} '${tarPath}' | base64`,
+        `tar -xzOf ${cacheFile} ${shQuote(tarPath)} | base64`,
         { timeout: 30000 }
       );
       content = base64Result.stdout;
@@ -352,25 +315,3 @@ export async function handleSnapshotFile(ctx: HandlerContext): Promise<Response>
   }
 }
 
-/**
- * Check if file is likely binary based on extension.
- */
-function isBinaryFile(path: string): boolean {
-  const binaryExtensions = [
-    ".tar",
-    ".gz",
-    ".zip",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".pdf",
-    ".exe",
-    ".bin",
-    ".so",
-    ".dylib",
-    ".mv2",
-    ".wasm",
-  ];
-  return binaryExtensions.some((ext) => path.toLowerCase().endsWith(ext));
-}

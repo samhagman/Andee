@@ -38,10 +38,10 @@ npm run deploy-secrets   # Secrets only (no code deploy)
 
 ```bash
 # Check sandbox worker health
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/"
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/"
 
 # Check telegram bot health
-curl -s "https://claude-telegram-bot.samuel-hagman.workers.dev/"
+curl -s "https://claude-telegram-bot.h2c.workers.dev/"
 ```
 
 ---
@@ -138,7 +138,7 @@ RUN npm install -g ws node-pty
 curl -s "https://andee-ide.pages.dev/" | head -5
 
 # Check sandbox worker IDE endpoints
-curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/sandboxes" \
+curl -s "https://claude-sandbox-worker.h2c.workers.dev/sandboxes" \
   -H "X-API-Key: $ANDEE_API_KEY"
 ```
 
@@ -306,11 +306,20 @@ andee-snapshots/
 
 ### Snapshot Lifecycle
 
+All snapshot operations use the unified `snapshot-operations.ts` module:
+
 - **Per-message snapshot**: Async, non-blocking snapshot after each Claude response (primary method)
 - **Fallback snapshot**: 55 minutes after last activity (before container sleeps)
 - **Pre-reset snapshot**: Automatically created when /reset or /factory-reset is called
 - **Manual snapshot**: Via /snapshot Telegram command or POST /snapshot endpoint
 - **Restore**: Happens automatically when a fresh container starts for a chatId that has snapshots
+
+**Implementation Details:**
+- `createAndUploadSnapshot()` - Creates tar.gz and uploads to R2
+  - Small files (<25MB): Buffered upload via `sandbox.readFile()` + `R2.put()`
+  - Large files (>25MB): Streaming multipart upload for reliability
+- `restoreSnapshot()` - Downloads from R2 via presigned URL (no size limits)
+- `destroyContainerWithCleanup()` - Destroys container and clears terminal URL cache
 
 Per-message snapshots ensure minimal data loss - at most one message worth of work.
 
@@ -390,12 +399,37 @@ npx wrangler r2 bucket create andee-sessions
 
 ## Key Code Locations
 
-Key code locations in `claude-sandbox-worker/src/index.ts`:
-- `PERSISTENT_SERVER_SCRIPT` - HTTP server with streaming input mode
-- `/ask` endpoint - Uses `startProcess()` + `waitForPort(8080)`
-- `getSandbox(..., { sleepAfter: "1h" })` - Container lifecycle config
+### Worker Core (`claude-sandbox-worker/src/`)
 
-Key config files:
+**Entry & Endpoints:**
+- `index.ts` - Worker endpoints, container lifecycle
+  - `/ask` endpoint - Uses `startProcess()` + `waitForPort(8080)`
+  - `getSandbox(..., { sleepAfter: "1h" })` - Container lifecycle config
+
+**Library Modules (`lib/`):**
+- `snapshot-operations.ts` - **Unified snapshot operations** (restore, upload, destroy)
+  - `restoreSnapshot()` - R2 download via presigned URL (no size limits)
+  - `createAndUploadSnapshot()` - Streaming for large files (>25MB)
+  - `destroyContainerWithCleanup()` - Clean destroy with cache cleanup
+- `file-utils.ts` - Binary file detection, base64 encoding utilities
+  - `isBinaryFile()` - Check if file should be base64-encoded
+  - `uint8ArrayToBase64()` - Chunked base64 encoding (avoids stack overflow)
+- `streaming.ts` - Multipart upload for large R2 objects
+- `r2-utils.ts` - Presigned URL generation for R2
+
+**Container Script:**
+- `scripts/persistent-server.script.js` - HTTP server with streaming input mode
+
+### Shared Utilities (`shared/`)
+
+- `lib/shell.ts` - Shell escaping with `shQuote()` for safe command execution
+- `lib/validation.ts` - Query parameter validation utilities
+  - `parseIsGroup()`, `requireIsGroup()`, `requireString()`
+  - `ValidationError` class for 400 responses
+- `config.ts` - Snapshot paths, timeouts, tar exclude flags
+
+### Config Files
+
 - `claude-sandbox-worker/wrangler.toml` - Container config, R2 bindings, instance type
 - `claude-telegram-bot/wrangler.toml` - Service binding to sandbox worker
 - `claude-sandbox-worker/Dockerfile` - Container image with Claude CLI + SDK

@@ -21,7 +21,7 @@ import type {
 } from "./types";
 
 const DEV_WORKER_URL = "http://localhost:8787";
-const PROD_WORKER_URL = "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+const PROD_WORKER_URL = "https://claude-sandbox-worker.h2c.workers.dev";
 const API_KEY_STORAGE_KEY = "andee-ide-api-key";
 
 function getWorkerUrl(): string {

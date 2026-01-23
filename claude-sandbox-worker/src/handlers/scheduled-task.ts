@@ -4,13 +4,11 @@
  * Similar to /ask but specifically for automated scheduled prompts.
  */
 
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox } from "@cloudflare/sandbox";
 import {
   CORS_HEADERS,
   HandlerContext,
-  Env,
   ScheduledTaskRequest,
-  getSnapshotPrefix,
 } from "../types";
 import {
   SANDBOX_SLEEP_AFTER,
@@ -18,112 +16,11 @@ import {
   QUICK_COMMAND_TIMEOUT_MS,
   CURL_TIMEOUT_MS,
   SERVER_STARTUP_TIMEOUT_MS,
-  SNAPSHOT_TMP_PATH,
-  TAR_TIMEOUT_MS,
-  buildRestoreExcludeFlags,
 } from "../../../shared/config";
 import { PERSISTENT_SERVER_SCRIPT } from "../scripts";
 import { mountMediaBucket } from "../lib/media";
-
-
-/**
- * Build environment variables for Claude SDK.
- */
-function buildSdkEnv(env: Env, userTimezone: string): Record<string, string> {
-  const baseEnv: Record<string, string> = {
-    HOME: "/home/claude",
-    TZ: userTimezone,
-  };
-
-  if (env.USE_OPENROUTER === "true") {
-    return {
-      ...baseEnv,
-      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
-      ANTHROPIC_AUTH_TOKEN: env.OPENROUTER_API_KEY || "",
-      ANTHROPIC_API_KEY: "",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: env.OPENROUTER_MODEL || "z-ai/glm-4.7",
-    };
-  } else {
-    return {
-      ...baseEnv,
-      ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
-    };
-  }
-}
-
-/**
- * Restore filesystem from the latest snapshot if one exists.
- */
-async function restoreFromSnapshot(
-  sandbox: InstanceType<typeof Sandbox>,
-  chatId: string,
-  senderId: string | undefined,
-  isGroup: boolean | undefined,
-  env: Env
-): Promise<boolean> {
-  if (!env.SNAPSHOTS) {
-    console.log(`[Worker] SNAPSHOTS binding not available, skipping restore`);
-    return false;
-  }
-
-  try {
-    const prefix = getSnapshotPrefix(chatId, senderId, isGroup);
-    const listResult = await env.SNAPSHOTS.list({ prefix });
-
-    if (listResult.objects.length === 0) {
-      console.log(`[Worker] No snapshots found for chat ${chatId}`);
-      return false;
-    }
-
-    const latestKey = listResult.objects
-      .sort((a, b) => b.key.localeCompare(a.key))[0].key;
-
-    console.log(`[Worker] Restoring from snapshot: ${latestKey}`);
-
-    const object = await env.SNAPSHOTS.get(latestKey);
-    if (!object) {
-      console.log(`[Worker] Snapshot not found in R2: ${latestKey}`);
-      return false;
-    }
-
-    // Convert to base64 using chunked approach to avoid stack overflow on large snapshots
-    // The spread operator (...new Uint8Array(arrayBuffer)) causes "Maximum call stack size exceeded"
-    // on files larger than ~500KB-1MB due to JavaScript's argument limit (~65K-130K)
-    const arrayBuffer = await object.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-    const CHUNK_SIZE = 32768; // 32KB chunks
-    let binaryString = '';
-    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-      const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-      binaryString += String.fromCharCode.apply(null, Array.from(chunk));
-    }
-    const base64Data = btoa(binaryString);
-
-    await sandbox.writeFile(SNAPSHOT_TMP_PATH, base64Data, {
-      encoding: "base64",
-    });
-
-    // Extract snapshot (excluding system files that come from Dockerfile)
-    const restoreExcludes = buildRestoreExcludeFlags();
-    const extractResult = await sandbox.exec(
-      `cd / && tar -xzf ${SNAPSHOT_TMP_PATH} ${restoreExcludes}`,
-      { timeout: TAR_TIMEOUT_MS }
-    );
-
-    if (extractResult.exitCode !== 0) {
-      console.error(`[Worker] Snapshot extract failed: ${extractResult.stderr}`);
-      return false;
-    }
-
-    await sandbox.exec(`rm -f ${SNAPSHOT_TMP_PATH}`, { timeout: 5000 });
-
-    console.log(`[Worker] Snapshot restored successfully for chat ${chatId}`);
-    return true;
-  } catch (error) {
-    console.error(`[Worker] Restore error:`, error);
-    return false;
-  }
-}
+import { restoreSnapshot } from "../lib/snapshot-operations";
+import { buildSdkEnv } from "../lib/container-startup";
 
 /**
  * Handle a scheduled task execution.
@@ -133,11 +30,8 @@ export async function handleScheduledTask(
   ctx: HandlerContext
 ): Promise<Response> {
   try {
-    // Allow internal scheduled task calls (from DO) - check header
-    const isInternalCall = ctx.request.headers.get("X-Scheduled-Task") === "true";
-
-    // If not internal, require API key
-    if (!isInternalCall && ctx.env.ANDEE_API_KEY) {
+    // Always require API key authentication (no header bypass)
+    if (ctx.env.ANDEE_API_KEY) {
       const providedKey = ctx.request.headers.get("X-API-Key");
       if (providedKey !== ctx.env.ANDEE_API_KEY) {
         return Response.json(
@@ -180,7 +74,7 @@ export async function handleScheduledTask(
       p.command?.includes("persistent_server.mjs")
     );
 
-    const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.samuel-hagman.workers.dev";
+    const PRODUCTION_WORKER_URL = "https://claude-sandbox-worker.h2c.workers.dev";
     const requestUrl = new URL(ctx.request.url);
     const workerUrl = requestUrl.host === "internal"
       ? PRODUCTION_WORKER_URL
@@ -191,7 +85,7 @@ export async function handleScheduledTask(
 
       // Restore from snapshot
       // senderId "system" is a first-class sender, handled by getSnapshotPrefix
-      const restored = await restoreFromSnapshot(sandbox, chatId, senderId, isGroup, ctx.env);
+      const restored = await restoreSnapshot({ sandbox, chatId, senderId, isGroup, env: ctx.env });
       if (restored) {
         console.log(`[Worker] [SCHEDULED] Filesystem restored for chat ${chatId}`);
       }

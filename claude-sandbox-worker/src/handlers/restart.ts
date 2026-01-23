@@ -9,16 +9,10 @@ import {
   CORS_HEADERS,
   HandlerContext,
   ResetRequest,
-  getSnapshotKey,
 } from "../types";
-import {
-  SANDBOX_SLEEP_AFTER,
-  SNAPSHOT_DIRS,
-  SNAPSHOT_TMP_PATH,
-  TAR_TIMEOUT_MS,
-  buildCreateExcludeFlags,
-} from "../../../shared/config";
-import { clearTerminalUrlCache } from "./ide";
+import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import { createAndUploadSnapshot, destroyContainerWithCleanup } from "../lib/snapshot-operations";
+import { clearTerminalUrl } from "../lib/r2-utils";
 
 export async function handleRestart(ctx: HandlerContext): Promise<Response> {
   try {
@@ -42,72 +36,33 @@ export async function handleRestart(ctx: HandlerContext): Promise<Response> {
     // Try to create snapshot before destroying
     let snapshotKey: string | null = null;
     try {
-      // Check if any directories have content
-      const dirsToBackup: string[] = [];
-      for (const dir of SNAPSHOT_DIRS) {
-        const checkResult = await sandbox.exec(`test -d ${dir} && ls -A ${dir}`, {
-          timeout: 5000,
-        });
-        if (checkResult.exitCode === 0 && checkResult.stdout.trim()) {
-          dirsToBackup.push(dir);
-        }
-      }
-
-      if (dirsToBackup.length > 0) {
-        console.log(`[Worker] Creating pre-restart snapshot for chat ${chatId}`);
-
-        // Create tar archive (excluding large caches like .memvid models)
-        const createExcludes = buildCreateExcludeFlags();
-        const tarCmd = `tar -czf ${SNAPSHOT_TMP_PATH} ${createExcludes} ${dirsToBackup.join(" ")} 2>/dev/null`;
-        const tarResult = await sandbox.exec(tarCmd, { timeout: TAR_TIMEOUT_MS });
-
-        if (tarResult.exitCode === 0) {
-          // Read and upload
-          const tarFile = await sandbox.readFile(SNAPSHOT_TMP_PATH, {
-            encoding: "base64",
-          });
-
-          if (tarFile.content && ctx.env.SNAPSHOTS) {
-            const binaryData = Uint8Array.from(atob(tarFile.content), (c) =>
-              c.charCodeAt(0)
-            );
-
-            snapshotKey = getSnapshotKey(chatId, senderId, isGroup);
-            await ctx.env.SNAPSHOTS.put(snapshotKey, binaryData, {
-              customMetadata: {
-                chatId,
-                senderId: senderId || "",
-                isGroup: String(isGroup),
-                createdAt: new Date().toISOString(),
-                directories: dirsToBackup.join(","),
-                reason: "pre-restart",
-              },
-            });
-
-            console.log(
-              `[Worker] Pre-restart snapshot saved: ${snapshotKey} (${binaryData.length} bytes)`
-            );
-          }
-        }
-      } else {
-        console.log(`[Worker] No content to snapshot for chat ${chatId}`);
+      const result = await createAndUploadSnapshot({
+        sandbox,
+        chatId,
+        senderId,
+        isGroup,
+        env: ctx.env,
+        reason: "pre-restart",
+      });
+      if (result.snapshotKey) {
+        snapshotKey = result.snapshotKey;
+        console.log(`[Restart] Created pre-restart snapshot: ${snapshotKey}`);
       }
     } catch (snapshotError) {
       // Log but don't fail the restart if snapshot fails
       console.warn(`[Worker] Pre-restart snapshot failed (continuing): ${snapshotError}`);
     }
 
-    // Destroy the sandbox container (kills all processes)
-    const sandboxId = `chat-${chatId}`;
-    await sandbox.destroy();
+    // Destroy the sandbox container with proper cleanup
+    await destroyContainerWithCleanup({ sandbox, chatId });
 
-    // Clear the terminal URL cache for this sandbox (exposed ports become invalid)
-    clearTerminalUrlCache(sandboxId);
+    // Clear stored terminal URL (container destroyed = URL invalid, need fresh one on restart)
+    await clearTerminalUrl(ctx.env.SNAPSHOTS, `chat-${chatId}`);
 
     // NOTE: We intentionally DO NOT delete the R2 session here.
     // This preserves the claudeSessionId for conversation continuity.
 
-    console.log(`[Worker] Sandbox destroyed for chat ${chatId} (session preserved)`);
+    console.log(`[Worker] Sandbox destroyed for chat ${chatId} (session preserved, terminal URL cleared)`);
 
     return Response.json(
       {

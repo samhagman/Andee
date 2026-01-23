@@ -448,7 +448,7 @@ export class RecurringSchedulesDO extends DurableObject<RecurringSchedulesEnv> {
     // seeing if we can reach localhost. For simplicity, try localhost first in dev.
     const workerUrls = [
       "http://127.0.0.1:8787", // Local dev (try first)
-      "https://claude-sandbox-worker.samuel-hagman.workers.dev", // Production
+      "https://claude-sandbox-worker.h2c.workers.dev", // Production
     ];
 
     let lastError: Error | null = null;

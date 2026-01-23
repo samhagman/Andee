@@ -52,12 +52,12 @@ If UI testing doesn't work, test directly via curl:
 
 ```bash
 # Get a snapshot key first
-SNAPSHOT_KEY=$(curl -s "https://claude-sandbox-worker.samuel-hagman.workers.dev/snapshots?chatId=999999999&senderId=999999999&isGroup=false" \
+SNAPSHOT_KEY=$(curl -s "https://claude-sandbox-worker.h2c.workers.dev/snapshots?chatId=999999999&senderId=999999999&isGroup=false" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" | \
   jq -r '.snapshots[0].key')
 
 # Test restore
-curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
+curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restore" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
   -d "{\"chatId\":\"999999999\",\"senderId\":\"999999999\",\"isGroup\":false,\"snapshotKey\":\"$SNAPSHOT_KEY\",\"markAsLatest\":false}" \
@@ -68,7 +68,7 @@ curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restore" \
 
 1. **If restore fails**: Check if sandbox needs restart first
    ```bash
-   curl -X POST "https://claude-sandbox-worker.samuel-hagman.workers.dev/restart" \
+   curl -X POST "https://claude-sandbox-worker.h2c.workers.dev/restart" \
      -H "Content-Type: application/json" \
      -H "X-API-Key: adk_8dfeed669475a5661b976ff13249c20c" \
      -d '{"chatId":"999999999","senderId":"999999999","isGroup":false}'

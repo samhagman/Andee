@@ -213,11 +213,6 @@ export default {
 
       case "/restore":
         if (request.method === "POST") {
-          // #region agent log
-          const sessionId = 'debug-session';
-          const runId = 'restore-run';
-          fetch('http://127.0.0.1:7243/ingest/8f468997-7817-4dbd-8ee7-1182e5e7b898',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'index.ts:185',message:'Router: /restore endpoint called',data:{method:request.method,url:ctx.request.url},timestamp:Date.now(),sessionId,runId,hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
           return handleSnapshotRestore(ctx);
         }
         break;
@@ -347,14 +342,14 @@ export default {
             console.log("[DEBUG] Step 1: Creating sandbox");
             const sandbox = getSandbox(env.Sandbox, debugSandboxId, { sleepAfter: "1h" });
             console.log("[DEBUG] Step 2: Calling getExposedPorts");
-            const result = await sandbox.getExposedPorts();
-            console.log("[DEBUG] Step 3: Got result:", JSON.stringify(result));
-            const ports = result?.ports || [];
-            console.log("[DEBUG] Step 4: Ports length:", ports.length);
-            return Response.json({ 
+            // Note: SDK returns array directly, requires hostname argument
+            const exposedPorts = await sandbox.getExposedPorts("samhagman.com");
+            console.log("[DEBUG] Step 3: Got result:", JSON.stringify(exposedPorts));
+            console.log("[DEBUG] Step 4: Ports length:", exposedPorts.length);
+            return Response.json({
               step: "completed",
-              portsCount: ports.length,
-              rawResult: result,
+              portsCount: exposedPorts.length,
+              rawResult: exposedPorts,
             }, { headers: CORS_HEADERS });
           } catch (error) {
             console.log("[DEBUG] Error:", error);

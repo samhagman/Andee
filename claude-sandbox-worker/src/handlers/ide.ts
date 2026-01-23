@@ -13,6 +13,10 @@ import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { CORS_HEADERS, HandlerContext, Env } from "../types";
 import { debug } from "../lib/debug";
 import { restoreFromSnapshot } from "../lib/container-startup";
+import { shQuote } from "../../../shared/lib/shell";
+import { SANDBOX_SLEEP_AFTER } from "../../../shared/config";
+import { isBinaryFile } from "../lib/file-utils";
+import { getTerminalUrl, storeTerminalUrl } from "../lib/r2-utils";
 
 // Auto-restore configuration
 const IDE_INIT_MARKER = "/tmp/.ide-initialized";
@@ -76,6 +80,40 @@ const USER_NAMES: Record<string, string> = {
 // Key: sandboxId, Value: { url: string, expiredAt: number }
 // URLs are cached for 55 minutes (sandbox sleeps after 1 hour of inactivity)
 const terminalUrlCache: Map<string, { url: string; expiresAt: number }> = new Map();
+
+// Maximum number of cached terminal URLs to prevent unbounded memory growth
+const MAX_TERMINAL_URL_CACHE_SIZE = 100;
+
+/**
+ * Prune expired and oldest entries from the terminal URL cache.
+ * Called automatically when cache size exceeds MAX_TERMINAL_URL_CACHE_SIZE.
+ * Removes all expired entries first, then oldest entries if still over limit.
+ */
+function pruneTerminalUrlCache(): void {
+  const now = Date.now();
+
+  // First pass: remove expired entries
+  for (const [key, value] of terminalUrlCache.entries()) {
+    if (value.expiresAt <= now) {
+      terminalUrlCache.delete(key);
+    }
+  }
+
+  // Second pass: if still over limit, remove oldest entries
+  if (terminalUrlCache.size > MAX_TERMINAL_URL_CACHE_SIZE) {
+    const entries = Array.from(terminalUrlCache.entries());
+    // Sort by expiresAt (oldest first)
+    entries.sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+
+    // Remove oldest entries until we're under the limit
+    const toRemove = entries.slice(0, terminalUrlCache.size - MAX_TERMINAL_URL_CACHE_SIZE);
+    for (const [key] of toRemove) {
+      terminalUrlCache.delete(key);
+    }
+
+    console.log(`[IDE] Pruned ${toRemove.length} terminal URL cache entries`);
+  }
+}
 
 /**
  * Clear the terminal URL cache for a specific sandbox.
@@ -172,7 +210,7 @@ export async function handleFiles(ctx: HandlerContext): Promise<Response> {
 
   try {
     debug.ide('getSandbox', sandboxId, { path });
-    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: SANDBOX_SLEEP_AFTER });
 
     // Step 1: Wake the sandbox with listProcesses()
     debug.ide('listProcesses-start', sandboxId, { reason: 'wake sandbox' });
@@ -208,7 +246,7 @@ export async function handleFiles(ctx: HandlerContext): Promise<Response> {
     // Step 2: Execute ls command
     debug.ide('exec-start', sandboxId, { command: 'ls -la', path });
     const result = await sandbox.exec(
-      `ls -la --time-style=+%Y-%m-%dT%H:%M:%S ${path} 2>/dev/null || echo "ERROR: Directory not found"`,
+      `ls -la --time-style=+%Y-%m-%dT%H:%M:%S ${shQuote(path)} 2>/dev/null || echo "ERROR: Directory not found"`,
       { timeout: 15000 }
     );
     debug.ide('exec-complete', sandboxId, {
@@ -275,7 +313,7 @@ export async function handleFileRead(ctx: HandlerContext): Promise<Response> {
   }
 
   try {
-    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: SANDBOX_SLEEP_AFTER });
 
     // CRITICAL: Use listProcesses() to wake the sandbox first
     console.log(`[IDE] Waking sandbox ${sandboxId} with listProcesses()`);
@@ -283,7 +321,7 @@ export async function handleFileRead(ctx: HandlerContext): Promise<Response> {
     console.log(`[IDE] Sandbox ${sandboxId} awake, reading file ${path}`);
     
     // Check if file exists
-    const statResult = await sandbox.exec(`stat -c '%s' ${path} 2>/dev/null || echo "NOT_FOUND"`, {
+    const statResult = await sandbox.exec(`stat -c '%s' ${shQuote(path)} 2>/dev/null || echo "NOT_FOUND"`, {
       timeout: 10000
     });
 
@@ -302,7 +340,7 @@ export async function handleFileRead(ctx: HandlerContext): Promise<Response> {
     let encoding: "utf-8" | "base64";
 
     if (isBinary) {
-      const result = await sandbox.exec(`base64 ${path}`, { timeout: 15000 });
+      const result = await sandbox.exec(`base64 ${shQuote(path)}`, { timeout: 15000 });
       content = result.stdout;
       encoding = "base64";
     } else {
@@ -343,7 +381,7 @@ export async function handleFileWrite(ctx: HandlerContext): Promise<Response> {
       );
     }
 
-    const sandbox = getSandbox(ctx.env.Sandbox, body.sandbox, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, body.sandbox, { sleepAfter: SANDBOX_SLEEP_AFTER });
 
     // Decode base64 if needed
     const content = body.encoding === "base64"
@@ -415,7 +453,7 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
   // This bypasses wsConnect which has issues
   
   try {
-    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: SANDBOX_SLEEP_AFTER });
     
     // Get the custom domain hostname for port exposure
     // Uses the custom domain andee.samhagman.com
@@ -454,22 +492,23 @@ export async function handleTerminal(ctx: HandlerContext): Promise<Response> {
 
     // Check if port is already exposed
     let exposedUrl: string | undefined;
-    
-    const { ports } = await sandbox.getExposedPorts();
-    const existingPort = ports.find(p => p.port === 8081);
-    
+
+    // Note: SDK returns array directly, not { ports: [...] }
+    // Requires hostname argument
+    const exposedPorts = await sandbox.getExposedPorts(hostname);
+    const existingPort = exposedPorts.find((p: { port: number; url: string }) => p.port === 8081);
+
     if (existingPort) {
-      console.log(`[IDE] Port 8081 already exposed at: ${existingPort.exposedAt}`);
-      exposedUrl = existingPort.exposedAt;
+      console.log(`[IDE] Port 8081 already exposed at: ${existingPort.url}`);
+      exposedUrl = existingPort.url;
     } else {
       // Expose the port via custom domain
       console.log(`[IDE] Exposing port 8081 for sandbox ${sandboxId} on ${hostname}`);
       const exposed = await sandbox.exposePort(8081, { hostname, name: "terminal" });
       console.log(`[IDE] exposePort result:`, JSON.stringify(exposed));
-      
-      // The SDK returns { exposedAt: string } but may vary in local dev
-      // Handle both cases
-      exposedUrl = exposed.exposedAt || (exposed as { url?: string }).url;
+
+      // SDK returns { url: string; port: number; name: string | undefined }
+      exposedUrl = exposed.url;
     }
     
     if (!exposedUrl) {
@@ -520,7 +559,7 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
   }
 
   try {
-    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: SANDBOX_SLEEP_AFTER });
 
     // CRITICAL: Use listProcesses() to wake the sandbox first
     console.log(`[IDE] Waking sandbox ${sandboxId} with listProcesses()`);
@@ -528,7 +567,7 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
     console.log(`[IDE] Sandbox ${sandboxId} awake, ${processes.length} processes running`);
 
     // Check if ws-terminal is running
-    const wsTerminalProcess = processes.find(p => 
+    const wsTerminalProcess = processes.find(p =>
       p.command?.includes("ws-terminal.js") || p.command?.includes("node /home/claude/.claude/scripts/ws-terminal")
     );
 
@@ -559,57 +598,113 @@ export async function handleTerminalUrl(ctx: HandlerContext): Promise<Response> 
     const customHostname = "samhagman.com";
     let exposedAt: string;
 
-    // Check server-side cache first to avoid re-exposing (which invalidates existing connections)
+    // =========================================================================
+    // STEP 1: Check R2 for stored URL (persists across Worker isolates)
+    // This is the key fix for connection cycling - R2 storage survives Worker restarts
+    // =========================================================================
+    const storedUrl = await getTerminalUrl(ctx.env.SNAPSHOTS, sandboxId);
+    if (storedUrl) {
+      console.log(`[IDE] Using R2-stored terminal URL for ${sandboxId}: ${storedUrl}`);
+      // Also update in-memory cache for this Worker instance
+      terminalUrlCache.set(sandboxId, {
+        url: storedUrl,
+        expiresAt: Date.now() + 55 * 60 * 1000,
+      });
+      return Response.json(
+        {
+          success: true,
+          terminalUrl: storedUrl.replace(/^wss:\/\//, "https://"),
+          wsUrl: storedUrl,
+          sandboxId,
+        },
+        { headers: CORS_HEADERS }
+      );
+    }
+
+    // =========================================================================
+    // STEP 2: Check in-memory cache (for same Worker instance)
+    // =========================================================================
     const cached = terminalUrlCache.get(sandboxId);
     if (cached && cached.expiresAt > Date.now()) {
-      console.log(`[IDE] Using cached terminal URL for ${sandboxId}: ${cached.url}`);
+      console.log(`[IDE] Using in-memory cached terminal URL for ${sandboxId}: ${cached.url}`);
       exposedAt = cached.url;
     } else {
-      // Cache miss or expired - need to expose the port
-      // NOTE: getExposedPorts() has a bug where it fails when ports are exposed.
-      // Workaround: Just try to expose the port. If it fails with "already exposed",
-      // unexpose and re-expose to get a fresh URL.
+      // =========================================================================
+      // STEP 3: No stored URL - need to expose the port
+      // =========================================================================
       try {
         console.log(`[IDE] Exposing port 8081 with hostname: ${customHostname}`);
         const exposed = await sandbox.exposePort(8081, { hostname: customHostname });
         console.log(`[IDE] exposePort result:`, JSON.stringify(exposed));
-        
+
         // Handle different response formats from the SDK
         const exposeResult = exposed as { exposedAt?: string; url?: string };
         exposedAt = exposeResult.exposedAt || exposeResult.url || "";
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         console.log(`[IDE] exposePort failed:`, errorMsg);
-        
-        // If port is already exposed, unexpose and re-expose to get fresh URL
-        // This works around the getExposedPorts() bug
+
+        // =========================================================================
+        // STEP 4: Port already exposed but URL not in R2 - try to recover URL
+        // CRITICAL: Don't unexpose/re-expose as that kills existing connections!
+        // =========================================================================
         if (errorMsg.includes("already exposed") || errorMsg.includes("PortAlreadyExposedError")) {
-          console.log(`[IDE] Port already exposed, unexposing and re-exposing`);
+          console.log(`[IDE] Port already exposed, trying getExposedPorts() to recover URL`);
+
           try {
+            // Try getExposedPorts() - this may or may not work due to SDK bug
+            // Note: SDK returns array directly, not { ports: [...] }
+            // Requires hostname argument
+            const exposedPorts = await sandbox.getExposedPorts(customHostname);
+            const existingPort = exposedPorts.find((p: { port: number; url: string }) => p.port === 8081);
+
+            if (existingPort?.url) {
+              console.log(`[IDE] Recovered URL from getExposedPorts(): ${existingPort.url}`);
+              exposedAt = existingPort.url;
+            } else {
+              // Last resort: unexpose and re-expose (this WILL kill existing connections)
+              console.log(`[IDE] getExposedPorts() didn't return URL, must unexpose/re-expose (will kill connections)`);
+              await sandbox.unexposePort(8081);
+              console.log(`[IDE] Unexposed port 8081, now re-exposing`);
+              const exposed = await sandbox.exposePort(8081, { hostname: customHostname });
+              const exposeResult = exposed as { exposedAt?: string; url?: string };
+              exposedAt = exposeResult.exposedAt || exposeResult.url || "";
+              console.log(`[IDE] Re-exposed port 8081 at: ${exposedAt}`);
+            }
+          } catch (recoveryError) {
+            console.log(`[IDE] Recovery failed, must unexpose/re-expose:`, recoveryError);
             await sandbox.unexposePort(8081);
-            console.log(`[IDE] Unexposed port 8081, now re-exposing`);
             const exposed = await sandbox.exposePort(8081, { hostname: customHostname });
             const exposeResult = exposed as { exposedAt?: string; url?: string };
             exposedAt = exposeResult.exposedAt || exposeResult.url || "";
-            console.log(`[IDE] Re-exposed port 8081 at: ${exposedAt}`);
-          } catch (reexposeError) {
-            console.log(`[IDE] Failed to re-expose:`, reexposeError);
-            throw reexposeError;
           }
         } else {
           throw error;
         }
       }
-      
-      // Cache the URL for 55 minutes (sandbox sleeps after 1 hour of inactivity)
+
+      // =========================================================================
+      // STEP 5: Store the URL in both R2 (persistent) and in-memory cache
+      // =========================================================================
       const CACHE_TTL_MS = 55 * 60 * 1000; // 55 minutes
+
+      // Store in R2 for persistence across Worker isolates
+      const wsUrl = exposedAt.replace(/^https?:\/\//, "wss://");
+      await storeTerminalUrl(ctx.env.SNAPSHOTS, sandboxId, wsUrl, CACHE_TTL_MS);
+
+      // Also store in in-memory cache for this Worker instance
       terminalUrlCache.set(sandboxId, {
         url: exposedAt,
         expiresAt: Date.now() + CACHE_TTL_MS,
       });
-      console.log(`[IDE] Cached terminal URL for ${sandboxId}`);
+      console.log(`[IDE] Stored terminal URL in R2 and in-memory cache for ${sandboxId}`);
+
+      // Prune expired and oldest entries if cache is getting large
+      if (terminalUrlCache.size > MAX_TERMINAL_URL_CACHE_SIZE) {
+        pruneTerminalUrlCache();
+      }
     }
-    
+
     if (!exposedAt) {
       throw new Error("Could not get exposed URL for port 8081");
     }
@@ -659,7 +754,7 @@ export async function handleWsContainerTest(ctx: HandlerContext): Promise<Respon
   }
 
   try {
-    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: "1h" });
+    const sandbox = getSandbox(ctx.env.Sandbox, sandboxId, { sleepAfter: SANDBOX_SLEEP_AFTER });
 
     // Ensure ttyd is running
     const processes = await sandbox.listProcesses();
@@ -751,22 +846,3 @@ function parseLsOutput(output: string): Array<{
   return entries;
 }
 
-// Helper: Check if file is likely binary based on extension
-function isBinaryFile(path: string): boolean {
-  const binaryExtensions = [
-    ".tar",
-    ".gz",
-    ".zip",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".pdf",
-    ".exe",
-    ".bin",
-    ".so",
-    ".dylib",
-    ".mv2",
-  ];
-  return binaryExtensions.some((ext) => path.toLowerCase().endsWith(ext));
-}

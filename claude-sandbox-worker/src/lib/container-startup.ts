@@ -4,8 +4,6 @@
  */
 
 import { type Sandbox } from "@cloudflare/sandbox";
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   Env,
   getSnapshotPrefix,
@@ -20,9 +18,7 @@ import {
   buildRestoreExcludeFlags,
 } from "../../../shared/config";
 import { PERSISTENT_SERVER_SCRIPT } from "../scripts";
-
-/** R2 bucket name for snapshots */
-const SNAPSHOT_BUCKET_NAME = "andee-snapshots";
+import { generatePresignedUrl } from "./r2-utils";
 
 export interface StartupResult {
   restored: boolean;
@@ -60,32 +56,6 @@ export function buildSdkEnv(env: Env, userTimezone: string): Record<string, stri
       ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
     };
   }
-}
-
-/**
- * Generate a presigned URL for downloading a snapshot from R2.
- * Uses S3-compatible API since R2 Workers API lacks getSignedUrl().
- */
-async function generatePresignedUrl(
-  env: Env,
-  snapshotKey: string,
-  expiresInSeconds: number = 300
-): Promise<string> {
-  const s3Client = new S3Client({
-    region: "auto",
-    endpoint: `https://${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: env.AWS_SECRET_ACCESS_KEY!,
-    },
-  });
-
-  const command = new GetObjectCommand({
-    Bucket: SNAPSHOT_BUCKET_NAME,
-    Key: snapshotKey,
-  });
-
-  return getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
 }
 
 /**

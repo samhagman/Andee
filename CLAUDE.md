@@ -62,33 +62,6 @@ See `/developing-andee` → DEBUGGING.md for full troubleshooting details.
 
 Both services use port 8787 for local development.
 
-## Engine Selection
-
-The sandbox worker supports three AI engines, configurable via environment variable:
-
-| Engine | `USE_ENGINE` value | Model | Use Case |
-|--------|-------------------|-------|----------|
-| Claude (default) | `claude` or unset | Claude via Agent SDK | Full agentic capabilities |
-| Goose | `goose` | GLM-4.7 via Goose CLI | Fast, cheap inference (~1000 TPS) |
-| OpenCode | `opencode` | GLM-4.7 via OpenCode SDK | Persistent sessions + Perplexity web search |
-
-**Set in wrangler.toml:**
-```toml
-[vars]
-USE_ENGINE = "claude"  # or "goose" or "opencode"
-```
-
-**Engine capabilities:**
-- **Claude**: Full Agent SDK tools, native vision (5MB limit), session resumption
-- **Goose**: Fast GLM-4.7 inference, one-shot execution, no persistent sessions
-- **OpenCode**: GLM-4.7 with persistent sessions, Perplexity MCP for web search, requires `CEREBRAS_API_KEY` + `PERPLEXITY_API_KEY`
-
-**Media handling differs by engine:**
-- **Claude engine**: Uses Claude's native vision (5MB file size limit)
-- **Goose/OpenCode engines**: Use Gemini 3 Flash via OpenRouter for media analysis (requires `OPENROUTER_API_KEY`)
-
-Media context is injected as `<attached_media_context>` blocks containing file paths and AI-generated descriptions.
-
 ## Developer Skills
 
 Use these skills for detailed guidance:
@@ -129,10 +102,15 @@ See `/developing-andee` for curl examples and test patterns.
 │  RECURRING SCHEDULES (per-chat):                                        │
 │  └── schedules/{chatId}/recurring.yaml                                  │
 │                                                                         │
+│  EPHEMERAL (IDE terminal, auto-expires):                                │
+│  └── terminal-urls/{sandboxId}.json    # WebSocket URL cache (55m TTL)  │
+│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 Key generation: `shared/types/session.ts` has `getSessionKey()`, `getSnapshotKey()`, `getSnapshotPrefix()`.
+
+**Terminal URL persistence:** WebSocket URLs are cached in R2 to survive Worker isolate restarts. Without this, different Workers calling `exposePort()` generate new URL tokens, breaking existing connections. Cleared on `/restart` and `/factory-reset`.
 
 ## Skills System
 
@@ -178,6 +156,9 @@ See `ANDEE_MEMORY_TAD.md` for full architecture details.
 - `claude-sandbox-worker/src/index.ts` - Worker endpoints, Sandbox SDK
 - `claude-sandbox-worker/src/handlers/ask.ts` - handleAsk() + voice transcription
 - `claude-sandbox-worker/src/scripts/persistent-server.script.js` - Main execution path
+- `claude-sandbox-worker/src/lib/snapshot-operations.ts` - Unified snapshot ops (restore, create, upload)
+- `claude-sandbox-worker/src/lib/file-utils.ts` - Binary file detection and base64 encoding
+- `claude-sandbox-worker/src/lib/r2-utils.ts` - Terminal URL caching, presigned URLs
 - `claude-sandbox-worker/Dockerfile` - Container image
 
 **Telegram Bot:**
@@ -189,6 +170,56 @@ See `ANDEE_MEMORY_TAD.md` for full architecture details.
 
 **IDE:**
 - `sandbox-ide/` - Browser IDE (https://andee-ide.pages.dev/)
+
+## Shared Utilities
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SHARED MODULES (shared/lib/)                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  shell.ts          ─► Shell escaping for command injection prevention   │
+│  │                    shQuote(s: string): string                        │
+│  │                    Used in: ide.ts, snapshot-preview.ts,             │
+│  │                             scheduled-task.ts                        │
+│  │                                                                      │
+│  validation.ts     ─► Query parameter validation utilities              │
+│                       parseIsGroup(value): boolean | undefined          │
+│                       requireIsGroup(value): boolean (throws if null)   │
+│                       ValidationError class for consistent handling     │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│  WORKER MODULES (claude-sandbox-worker/src/lib/)                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  snapshot-operations.ts  ─► Unified snapshot operations (398 lines)     │
+│  │                          restoreSnapshot() - Download + extract      │
+│  │                          cacheSnapshotForPreview() - Browsing cache  │
+│  │                          createAndUploadSnapshot() - Create + upload │
+│  │                          destroyContainerWithCleanup() - Destroy +   │
+│  │                                                         cache clear  │
+│  │                                                                      │
+│  file-utils.ts           ─► Binary file detection and encoding          │
+│  │                          isBinaryFile(path): boolean                 │
+│  │                          uint8ArrayToBase64(bytes): string (chunked) │
+│  │                                                                      │
+│  r2-utils.ts             ─► R2 storage utilities for IDE                │
+│                             getTerminalUrl() - Retrieve cached WS URL   │
+│                             storeTerminalUrl() - Persist URL (55m TTL)  │
+│                             clearTerminalUrl() - Clear on restart       │
+│                             generatePresignedUrl() - Snapshot downloads │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Import examples:
+```typescript
+import { shQuote } from '@andee/shared/lib/shell';
+import { parseIsGroup, requireIsGroup, ValidationError } from '@andee/shared/lib/validation';
+import { restoreSnapshot, createAndUploadSnapshot } from '../lib/snapshot-operations';
+import { isBinaryFile, uint8ArrayToBase64 } from '../lib/file-utils';
+import { getTerminalUrl, storeTerminalUrl, clearTerminalUrl } from '../lib/r2-utils';
+```
 
 ## Endpoints Reference
 
@@ -216,6 +247,7 @@ See `ANDEE_MEMORY_TAD.md` for full architecture details.
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/sandboxes` | GET | List R2 sessions |
+| `/terminal-url?sandbox=X` | GET | Get WebSocket URL for terminal (R2-cached) |
 | `/ws` | WS | WebSocket terminal |
 | `/files` | GET | List directory |
 | `/file` | GET/PUT | Read/write file |

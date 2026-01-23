@@ -333,7 +333,7 @@ All verification was performed programmatically via Chrome DevTools MCP tools:
 # Worker deployment
 cd claude-sandbox-worker && npm run deploy
 # ... Docker image built with node-pty ...
-# Successfully deployed to https://claude-sandbox-worker.samuel-hagman.workers.dev
+# Successfully deployed to https://claude-sandbox-worker.h2c.workers.dev
 
 # IDE deployment (no changes needed for PTY)
 cd sandbox-ide && npm run deploy

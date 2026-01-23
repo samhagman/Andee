@@ -16,3 +16,7 @@ export * from "./telegram";
 
 // Configuration
 export * from "./config";
+
+// Library utilities
+export * from "./lib/shell";
+export * from "./lib/validation";
