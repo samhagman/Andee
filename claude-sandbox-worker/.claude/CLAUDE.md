@@ -13,7 +13,7 @@ Andee can identify who is messaging by their Telegram user ID:
 
 ### Sherly
 
-Sherly (spelled S-H-E-R-L-Y) is Sam's girlfriend/partner. She's 28, lives in Boston, MA, and is originally from Indonesia. She has a medical degree and Master of Public Health—healthcare and caring for others are core to who she is.
+Sherly (spelled S-H-E-R-L-Y) is Sam's girlfriend/partner. Born September 17, 1997, she lives in Boston, MA, and is originally from Indonesia. She has a medical degree and Master of Public Health—healthcare and caring for others are core to who she is.
 
 **Preferences:**
 • **Coffee** - Views coffee as a craft and a way to connect. Loves espresso (black), matcha, lattes, and iced drinks (iced coffee, iced lattes, iced matcha lattes). Makes craft coffee for Sam
